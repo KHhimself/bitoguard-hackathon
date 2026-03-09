@@ -10,6 +10,8 @@ DEFAULT_SOURCE_URL = "http://127.0.0.1:8000"
 DEFAULT_ORACLE_DIR = ROOT_DIR.parent / "bitoguard_sim_output"
 DEFAULT_DB_PATH = ROOT_DIR / "artifacts" / "bitoguard.duckdb"
 DEFAULT_ARTIFACT_DIR = ROOT_DIR / "artifacts"
+DEFAULT_AWS_EVENT_RAW_DIR = ROOT_DIR.parent / "data" / "aws_event" / "raw"
+DEFAULT_AWS_EVENT_CLEAN_DIR = ROOT_DIR.parent / "data" / "aws_event" / "clean"
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,8 @@ class Settings:
     oracle_dir: Path
     db_path: Path
     artifact_dir: Path
+    aws_event_raw_dir: Path
+    aws_event_clean_dir: Path
     label_source: str
     internal_api_port: int
 
@@ -33,6 +37,8 @@ def load_settings() -> Settings:
         oracle_dir=Path(os.getenv("BITOGUARD_ORACLE_DIR", str(DEFAULT_ORACLE_DIR))).resolve(),
         db_path=db_path,
         artifact_dir=artifact_dir,
+        aws_event_raw_dir=Path(os.getenv("BITOGUARD_AWS_EVENT_RAW_DIR", str(DEFAULT_AWS_EVENT_RAW_DIR))).resolve(),
+        aws_event_clean_dir=Path(os.getenv("BITOGUARD_AWS_EVENT_CLEAN_DIR", str(DEFAULT_AWS_EVENT_CLEAN_DIR))).resolve(),
         label_source=os.getenv("BITOGUARD_LABEL_SOURCE", "hidden_suspicious_label"),
         internal_api_port=int(os.getenv("BITOGUARD_INTERNAL_API_PORT", "8001")),
     )

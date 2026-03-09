@@ -46,3 +46,25 @@ yarn-error.log*
 *.zip
 *.tmp
 *:Zone.Identifier
+
+# Official organizer dataset snapshots
+data/aws_event/raw/*
+data/aws_event/clean/*
+!data/aws_event/raw/.gitkeep
+!data/aws_event/clean/.gitkeep
+!data/aws_event/README.md
+
+# Runtime logs
+bitoguard_core/artifacts/logs/
+
+# Official pipeline generated artifacts
+bitoguard_core/artifacts/official_features/
+bitoguard_core/artifacts/predictions/official_predict_scores.parquet
+bitoguard_core/artifacts/predictions/official_predict_scores.csv
+bitoguard_core/artifacts/reports/official_data_contract_report.json
+bitoguard_core/artifacts/reports/official_validation_report.json
+bitoguard_core/artifacts/reports/official_shadow_report.json
+bitoguard_core/artifacts/models/official_lgbm_*.pkl
+bitoguard_core/artifacts/models/official_lgbm_*.json
+bitoguard_core/artifacts/models/official_iforest_*.pkl
+bitoguard_core/artifacts/models/official_iforest_*.json
