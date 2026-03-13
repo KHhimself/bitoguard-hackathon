@@ -1,10 +1,17 @@
+"""BitoPro source API HTTP client.
+
+Handles HTTP pagination and protocol detection only.
+All schema transformation logic lives in pipeline/transformers.py.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 
 import httpx
+
+from pipeline.transformers import project_postgrest_payload
 
 
 @dataclass(frozen=True)
@@ -12,6 +19,13 @@ class SourceEndpoint:
     name: str
     path: str
     primary_key: str
+
+
+@dataclass(frozen=True)
+class PostgrestTable:
+    path: str
+    time_field: str | None
+    sort_field: str
 
 
 SOURCE_ENDPOINTS: tuple[SourceEndpoint, ...] = (
@@ -28,25 +42,58 @@ SOURCE_ENDPOINTS: tuple[SourceEndpoint, ...] = (
     SourceEndpoint("crypto_wallets", "/v1/crypto-wallets", "wallet_id"),
 )
 
+POSTGREST_TABLES: dict[str, PostgrestTable] = {
+    "user_info": PostgrestTable("/user_info", "confirmed_at", "user_id"),
+    "twd_transfer": PostgrestTable("/twd_transfer", "created_at", "id"),
+    "usdt_twd_trading": PostgrestTable("/usdt_twd_trading", "updated_at", "id"),
+    "usdt_swap": PostgrestTable("/usdt_swap", "created_at", "id"),
+    "crypto_transfer": PostgrestTable("/crypto_transfer", "created_at", "id"),
+    "train_label": PostgrestTable("/train_label", None, "user_id"),
+}
+
+
+def detect_postgrest_openapi(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    paths = payload.get("paths")
+    return isinstance(paths, dict) and "/user_info" in paths and "/crypto_transfer" in paths
+
 
 class SourceClient:
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 30.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.transport = transport
 
     def fetch_all(
         self,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         page_size: int = 1000,
+        progress_callback: Callable[[str, int], None] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
-        with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
+        with httpx.Client(base_url=self.base_url, timeout=self.timeout, transport=self.transport) as client:
+            if self._is_postgrest_source(client):
+                return self._fetch_postgrest_all(client, start_time, end_time, page_size, progress_callback)
             return {
-                endpoint.name: self._fetch_endpoint(client, endpoint.path, start_time, end_time, page_size)
+                endpoint.name: self._fetch_v1_endpoint(client, endpoint.path, start_time, end_time, page_size)
                 for endpoint in SOURCE_ENDPOINTS
             }
 
-    def _fetch_endpoint(
+    def _is_postgrest_source(self, client: httpx.Client) -> bool:
+        try:
+            response = client.get("/", headers={"Accept": "application/json"})
+            response.raise_for_status()
+            return detect_postgrest_openapi(response.json())
+        except Exception:
+            return False
+
+    def _fetch_v1_endpoint(
         self,
         client: httpx.Client,
         path: str,
@@ -70,3 +117,75 @@ class SourceClient:
                 break
             page += 1
         return items
+
+    def _fetch_postgrest_all(
+        self,
+        client: httpx.Client,
+        start_time: datetime | None,
+        end_time: datetime | None,
+        page_size: int,
+        progress_callback: Callable[[str, int], None] | None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        upstream_payload: dict[str, list[dict[str, Any]]] = {}
+        for name, table in POSTGREST_TABLES.items():
+            table_progress_callback = None
+            if progress_callback is not None:
+                def table_progress_callback(row_count: int, table_name: str = name) -> None:
+                    progress_callback(table_name, row_count)
+
+            upstream_payload[name] = self._fetch_postgrest_table(
+                client,
+                table,
+                start_time=start_time if name != "train_label" else None,
+                end_time=end_time if name != "train_label" else None,
+                page_size=page_size,
+                progress_callback=table_progress_callback,
+            )
+            if progress_callback is not None:
+                progress_callback(name, len(upstream_payload[name]))
+        return project_postgrest_payload(upstream_payload)
+
+    def _fetch_postgrest_table(
+        self,
+        client: httpx.Client,
+        table: PostgrestTable,
+        *,
+        start_time: datetime | None,
+        end_time: datetime | None,
+        page_size: int,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        offset = 0
+        rows: list[dict[str, Any]] = []
+        while True:
+            params: list[tuple[str, str | int]] = [
+                ("order", f"{table.sort_field}.asc"),
+                ("limit", page_size),
+                ("offset", offset),
+            ]
+            if table.time_field and start_time and end_time:
+                params.append((
+                    "and",
+                    f"({table.time_field}.gte.{self._format_postgrest_time(start_time)},{table.time_field}.lt.{self._format_postgrest_time(end_time)})",
+                ))
+            elif table.time_field and start_time:
+                params.append((table.time_field, f"gte.{self._format_postgrest_time(start_time)}"))
+            elif table.time_field and end_time:
+                params.append((table.time_field, f"lt.{self._format_postgrest_time(end_time)}"))
+
+            response = client.get(table.path, params=params)
+            response.raise_for_status()
+            batch = response.json()
+            if not batch:
+                break
+            rows.extend(batch)
+            if progress_callback is not None:
+                progress_callback(len(rows))
+            if len(batch) < page_size:
+                break
+            offset += len(batch)
+        return rows
+
+    def _format_postgrest_time(self, value: datetime) -> str:
+        normalized = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return normalized.replace(tzinfo=None).isoformat(timespec="seconds")

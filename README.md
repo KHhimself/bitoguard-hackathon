@@ -1,62 +1,128 @@
-# BitoGuard Project Bundle
+# BitoGuard — Exchange-Centric AML Risk Detection System
 
-這個 bundle 目前包含三個主要可執行模組：
+BitoGuard is a production-minded Anti-Money Laundering (AML) / fraud-risk detection system built over the BitoPro AWS-event data model. It implements a complete 6-module architecture for detecting, explaining, and monitoring suspicious activity on a cryptocurrency exchange.
 
-- `bitoguard_mock_api`：外部資料來源模擬 API，預設 `http://127.0.0.1:8000`
-- `bitoguard_core`：內部風控 API，預設 `http://127.0.0.1:8001`
-- `bitoguard_frontend`：Next.js 前端，預設 `http://127.0.0.1:3000`
+## Architecture Overview
 
-舊版 `Streamlit` dashboard 已移除，現在只保留 Next.js 前端。
+| Module | Description | Key Files |
+|--------|-------------|-----------|
+| M1: Rules | 11 deterministic AML rules, severity-weighted scoring | `bitoguard_core/models/rule_engine.py` |
+| M2: Statistical | Peer-deviation features, cohort percentile ranks, rolling windows | `bitoguard_core/features/build_features.py` |
+| M3: Supervised | LightGBM with leakage-safe temporal splits, P@K, calibration | `bitoguard_core/models/train.py`, `validate.py` |
+| M4: Anomaly | IsolationForest novelty detection, anomaly score + type | `bitoguard_core/models/anomaly.py` |
+| M5: Graph | NetworkX heterogeneous graph (IP/wallet/user), blacklist proximity | `bitoguard_core/features/graph_features.py` |
+| M6: Ops | SHAP case reports, incremental refresh, drift detection, AWS prep | `bitoguard_core/services/`, `pipeline/refresh_live.py` |
 
-## 最快啟動方式
-
-如果你想先把部署流程固定下來，現在也可以直接走 Docker：
+## Quick Start
 
 ```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle
+# Start everything with Docker
 cp deploy/.env.compose.example .env
 docker compose up --build
-```
 
-如果你要重跑 sync pipeline，再改用：
+# Or run locally
+cd bitoguard_core
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-```bash
-docker compose --profile sync up --build
-```
+# Run all 61 tests
+make test
 
-AWS EC2 的 Docker + Nginx 部署指引在 [deploy/README.md](/home/a0210/projects/sideProject/bitoguard_project_bundle/deploy/README.md)。
+# Full pipeline
+make sync && make features && make train && make score && make drift
 
-### 1. 啟動 `bitoguard_core`
-
-```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle/bitoguard_core
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
+# API server
 PYTHONPATH=. uvicorn api.main:app --reload --port 8001
 ```
 
-### 2. 啟動 `bitoguard_frontend`
+## Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| `bitoguard_core` | 8001 | FastAPI — pipeline, model, alerts, graph, metrics |
+| `bitoguard_frontend` | 3000 | Next.js — alerts dashboard, model ops, graph explorer |
+| `bitoguard_mock_api` | 8000 | Mock PostgREST for offline fixture testing |
+
+### Frontend
 
 ```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle/bitoguard_frontend
-npm install
-cp .env.example .env.local
-npm run dev
+cd bitoguard_frontend && npm install && npm run dev
+# Open http://localhost:3000
 ```
 
-然後開啟 <http://127.0.0.1:3000>。
-
-## 何時需要 `bitoguard_mock_api`
-
-如果你只是要查看 bundle 內已附帶的 demo 結果，不需要先啟動 `bitoguard_mock_api`。
-
-只有在要重跑資料同步流程時，才需要額外啟動它：
+### Mock API (offline development only)
 
 ```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle/bitoguard_mock_api
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
+cd bitoguard_mock_api
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
+
+## Makefile Targets (run from `bitoguard_core/`)
+
+```bash
+make test        # Run all 61 tests
+make sync        # Sync live BitoPro data
+make features    # Build feature snapshots + graph features
+make train       # Train LightGBM + IsolationForest
+make evaluate    # Holdout evaluation (P/R/F1/P@K/calibration)
+make ablation    # Module ablation study
+make refresh     # Incremental refresh (watermark-bounded)
+make score       # Score latest snapshot → alerts
+make drift       # Feature distribution drift check
+make cases       # Generate SHAP case reports
+make docker-build
+make docker-up
+```
+
+## API Endpoints (bitoguard_core, port 8001)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /healthz` | Health check |
+| `POST /pipeline/sync` | Trigger data sync |
+| `POST /features/rebuild` | Rebuild feature snapshots |
+| `POST /model/train` | Train + evaluate model |
+| `POST /model/score` | Score latest snapshot |
+| `GET /alerts` | List alerts (paginated) |
+| `GET /alerts/{id}/report` | Risk diagnosis with SHAP + graph |
+| `POST /alerts/{id}/decision` | Case decision |
+| `GET /users/{id}/360` | User 360 view |
+| `GET /users/{id}/graph` | Graph neighborhood (1-2 hops) |
+| `GET /metrics/model` | Full validation report (P@K, calibration, FI) |
+| `GET /metrics/threshold` | Threshold sensitivity table |
+| `GET /metrics/drift` | Feature drift health (auto-refreshes 60s in UI) |
+
+## Documentation
+
+| Document | Location |
+|----------|----------|
+| Local runbook | `docs/RUNBOOK_LOCAL.md` |
+| AWS runbook | `docs/RUNBOOK_AWS.md` |
+| Evaluation report | `docs/EVALUATION_REPORT.md` |
+| Feature dictionary | `docs/FEATURE_DICTIONARY.md` |
+| Rule book | `docs/RULEBOOK.md` |
+| Graph schema | `docs/GRAPH_SCHEMA.md` |
+| Model card | `docs/MODEL_CARD.md` |
+| Data contract | `docs/DATA_CONTRACT.md` |
+| AWS deployment plan | `.orchestration/DEPLOYMENT_PLAN_AWS.md` |
+
+## Current Test Results
+
+```
+bitoguard_core/:    61 passed  (unit + integration + smoke + drift + rule engine + API)
+bitoguard_mock_api/: 12 passed
+```
+
+## AWS Deployment
+
+Infrastructure artifacts are in `infra/aws/` and `scripts/`:
+
+```bash
+# Requires AWS credentials + ECR/ECS setup:
+./scripts/build_and_push.sh    # Build + push images to ECR
+./scripts/deploy_aws.sh        # Register task defs + update ECS services
+```
+
+See `docs/RUNBOOK_AWS.md` and `.orchestration/DEPLOYMENT_PLAN_AWS.md`.

@@ -20,6 +20,7 @@ from models.validate import validate_model
 from pipeline.sync import run_sync
 from services.alert_engine import apply_case_decision
 from services.diagnosis import build_risk_diagnosis
+from services.drift import run_drift_check
 
 
 class SyncRequest(BaseModel):
@@ -34,10 +35,12 @@ class DecisionRequest(BaseModel):
     note: str = ""
 
 
+_settings = load_settings()
+
 app = FastAPI(title="BitoGuard Core API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_settings.cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -82,7 +85,7 @@ def _records_to_dicts(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
-def _build_graph_payload(store: DuckDBStore, user_id: str, max_hops: int) -> dict[str, Any]:
+def _build_graph_payload(store: DuckDBStore, user_id: str, max_hops: int, max_nodes: int = 120, max_edges: int = 240) -> dict[str, Any]:
     edges = store.read_table("canonical.entity_edges")
     focus_node_id = f"user:{user_id}"
     if edges.empty:
@@ -168,7 +171,7 @@ def _build_graph_payload(store: DuckDBStore, user_id: str, max_hops: int) -> dic
 
     node_records.sort(key=lambda item: (item["hop"], item["id"]))
     original_node_count = len(node_records)
-    kept_node_records = node_records[:120]
+    kept_node_records = node_records[:max_nodes]
     kept_node_ids = {item["id"] for item in kept_node_records}
     if focus_node_id not in kept_node_ids:
         kept_node_ids.add(focus_node_id)
@@ -181,8 +184,8 @@ def _build_graph_payload(store: DuckDBStore, user_id: str, max_hops: int) -> dic
     ].copy()
     graph_edges = graph_edges.sort_values("edge_id")
     original_edge_count = len(graph_edges)
-    if original_edge_count > 240:
-        graph_edges = graph_edges.head(240).copy()
+    if original_edge_count > max_edges:
+        graph_edges = graph_edges.head(max_edges).copy()
     used_node_ids = set(graph_edges["src_node"]).union(set(graph_edges["dst_node"]))
     used_node_ids.add(focus_node_id)
     final_nodes = [item for item in kept_node_records if item["id"] in used_node_ids]
@@ -211,7 +214,7 @@ def _build_graph_payload(store: DuckDBStore, user_id: str, max_hops: int) -> dic
                 for node in final_nodes
                 if node["type"] == "user" and not node["is_focus"] and node["risk_level"] in {"high", "critical"}
             ),
-            "is_truncated": original_node_count > 120 or original_edge_count > 240,
+            "is_truncated": original_node_count > max_nodes or original_edge_count > max_edges,
         },
         "nodes": final_nodes,
         "edges": final_edges,
@@ -364,7 +367,11 @@ def user_360(user_id: str) -> dict[str, Any]:
 def user_graph(user_id: str, max_hops: int = Query(default=2, ge=1, le=2)) -> dict[str, Any]:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
-    return _build_graph_payload(store, user_id, max_hops=max_hops)
+    return _build_graph_payload(
+        store, user_id, max_hops=max_hops,
+        max_nodes=settings.graph_max_nodes,
+        max_edges=settings.graph_max_edges,
+    )
 
 
 @app.post("/alerts/{alert_id}/decision")
@@ -390,3 +397,8 @@ def model_metrics() -> dict[str, Any]:
 def threshold_metrics() -> list[dict[str, Any]]:
     report = model_metrics()
     return report["threshold_sensitivity"]
+
+
+@app.get("/metrics/drift")
+def drift_metrics() -> dict[str, Any]:
+    return run_drift_check().to_dict()

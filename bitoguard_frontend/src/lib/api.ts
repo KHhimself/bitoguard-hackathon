@@ -123,4 +123,7 @@ export const api = {
 
   getModelMetrics: () =>
     get("/metrics/model"),
+
+  getDriftMetrics: () =>
+    get("/metrics/drift"),
 }

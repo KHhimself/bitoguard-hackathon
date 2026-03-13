@@ -8,13 +8,12 @@ services:
     environment:
       BITOGUARD_DB_PATH: /app/bitoguard_core/artifacts/bitoguard.duckdb
       BITOGUARD_ARTIFACT_DIR: /app/bitoguard_core/artifacts
-      BITOGUARD_ORACLE_DIR: /app/bitoguard_sim_output
-      BITOGUARD_SOURCE_URL: ${BITOGUARD_SOURCE_URL:-http://mock-api:8000}
+      BITOGUARD_SOURCE_URL: ${BITOGUARD_SOURCE_URL:-https://aws-event-api.bitopro.com}
       BITOGUARD_LABEL_SOURCE: ${BITOGUARD_LABEL_SOURCE:-hidden_suspicious_label}
       BITOGUARD_INTERNAL_API_PORT: 8001
+      BITOGUARD_CORS_ORIGINS: ${BITOGUARD_CORS_ORIGINS:-http://localhost:3000}
     volumes:
       - ./bitoguard_core/artifacts:/app/bitoguard_core/artifacts
-      - ./bitoguard_sim_output:/app/bitoguard_sim_output:ro
     ports:
       - "127.0.0.1:8001:8001"
     healthcheck:
@@ -46,25 +45,3 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
-
-  mock-api:
-    build:
-      context: .
-      dockerfile: bitoguard_mock_api/Dockerfile
-    container_name: bitoguard-mock-api
-    restart: unless-stopped
-    profiles: ["sync"]
-    ports:
-      - "127.0.0.1:8000:8000"
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')",
-        ]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s

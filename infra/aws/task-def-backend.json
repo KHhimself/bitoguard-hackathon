@@ -1,0 +1,84 @@
+{
+  "family": "bitoguard-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/bitoguard-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/bitoguard-task-role",
+  "volumes": [
+    {
+      "name": "bitoguard-efs",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<EFS_FILE_SYSTEM_ID>",
+        "rootDirectory": "/bitoguard",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/bitoguard-backend:latest",
+      "portMappings": [
+        {
+          "containerPort": 8001,
+          "hostPort": 8001,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "BITOGUARD_DB_PATH",
+          "value": "/mnt/efs/bitoguard.duckdb"
+        },
+        {
+          "name": "BITOGUARD_ARTIFACT_DIR",
+          "value": "/mnt/efs/artifacts"
+        },
+        {
+          "name": "BITOGUARD_SOURCE_URL",
+          "value": "https://aws-event-api.bitopro.com"
+        },
+        {
+          "name": "BITOGUARD_INTERNAL_API_PORT",
+          "value": "8001"
+        },
+        {
+          "name": "BITOGUARD_LABEL_SOURCE",
+          "value": "hidden_suspicious_label"
+        },
+        {
+          "name": "PYTHONPATH",
+          "value": "/app/bitoguard_core"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "bitoguard-efs",
+          "containerPath": "/mnt/efs",
+          "readOnly": false
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/bitoguard-backend",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz')\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "essential": true
+    }
+  ]
+}

@@ -4,19 +4,18 @@ from datetime import datetime, timezone
 
 from sklearn.ensemble import IsolationForest
 
-from models.common import encode_features, feature_columns, model_dir, save_json, save_pickle, training_dataset
+from models.common import encode_features, feature_columns, forward_date_splits, model_dir, save_json, save_pickle, training_dataset
 
 
 def train_anomaly_model() -> dict:
     dataset = training_dataset().sort_values("snapshot_date").reset_index(drop=True)
     feature_cols = feature_columns(dataset)
-    unique_dates = sorted(dataset["snapshot_date"].dt.date.unique())
-    train_dates = set(unique_dates[:20])
+    train_dates = set(forward_date_splits(dataset["snapshot_date"])["train"])
     train_frame = dataset[dataset["snapshot_date"].dt.date.isin(train_dates)].copy()
     x_train, encoded_columns = encode_features(train_frame, feature_cols)
     model = IsolationForest(
         n_estimators=200,
-        contamination=max(0.01, float(train_frame["hidden_suspicious_label"].mean())),
+        contamination=min(0.5, max(0.01, float(train_frame["hidden_suspicious_label"].mean()))),
         random_state=42,
     )
     model.fit(x_train)
@@ -25,7 +24,12 @@ def train_anomaly_model() -> dict:
     meta_path = model_dir() / f"{version}.json"
     save_pickle(model, model_path)
     save_json(
-        {"model_version": version, "feature_columns": feature_cols, "encoded_columns": encoded_columns},
+        {
+            "model_version": version,
+            "feature_columns": feature_cols,
+            "encoded_columns": encoded_columns,
+            "train_dates": sorted(str(d) for d in train_dates),
+        },
         meta_path,
     )
     return {"model_version": version, "model_path": str(model_path), "meta_path": str(meta_path)}

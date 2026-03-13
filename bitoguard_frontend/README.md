@@ -5,7 +5,7 @@
 ## 安裝
 
 ```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle/bitoguard_frontend
+cd bitoguard_frontend
 npm install
 cp .env.example .env.local
 ```
@@ -15,7 +15,7 @@ cp .env.example .env.local
 先啟動 `bitoguard_core` internal API：
 
 ```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle/bitoguard_core
+cd bitoguard_core
 . .venv/bin/activate
 PYTHONPATH=. uvicorn api.main:app --reload --port 8001
 ```
@@ -23,7 +23,7 @@ PYTHONPATH=. uvicorn api.main:app --reload --port 8001
 再啟動前端：
 
 ```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle/bitoguard_frontend
+cd bitoguard_frontend
 npm run dev
 ```
 
@@ -37,4 +37,4 @@ npm run dev
 BITOGUARD_INTERNAL_API_BASE=http://127.0.0.1:8001
 ```
 
-若只想看已內建的 demo 資料，不需要先跑 `bitoguard_mock_api`。只有在你要重跑 sync pipeline 時，才需要另外啟動 mock API。
+若只想看已內建的 demo 資料，不需要先跑 `bitoguard_mock_api`。目前 sync pipeline 預設直接讀取 BitoPro AWS Event API；`bitoguard_mock_api` 只保留給本地 fixture 驗證或離線開發。

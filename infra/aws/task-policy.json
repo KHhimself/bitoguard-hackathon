@@ -1,0 +1,26 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EFSAccess",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:ClientMount",
+        "elasticfilesystem:ClientWrite",
+        "elasticfilesystem:ClientRootAccess",
+        "elasticfilesystem:DescribeMountTargets"
+      ],
+      "Resource": "arn:aws:elasticfilesystem:<REGION>:<ACCOUNT_ID>:file-system/<EFS_FILE_SYSTEM_ID>"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:log-group:/ecs/bitoguard-*"
+    }
+  ]
+}

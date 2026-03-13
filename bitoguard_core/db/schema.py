@@ -193,4 +193,16 @@ OPS_TABLE_DDLS: tuple[str, ...] = (
         metrics_json JSON
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS ops.refresh_state (
+        pipeline_name VARCHAR PRIMARY KEY,
+        status VARCHAR,
+        last_success_at TIMESTAMPTZ,
+        last_source_event_at TIMESTAMPTZ,
+        last_run_started_at TIMESTAMPTZ,
+        last_run_finished_at TIMESTAMPTZ,
+        last_error VARCHAR,
+        details_json JSON
+    )
+    """,
 )

@@ -1,0 +1,51 @@
+{
+  "family": "bitoguard-frontend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/bitoguard-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/bitoguard-task-role",
+  "containerDefinitions": [
+    {
+      "name": "frontend",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/bitoguard-frontend:latest",
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "BITOGUARD_INTERNAL_API_BASE",
+          "value": "http://bitoguard-backend.bitoguard.local:8001"
+        },
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/bitoguard-frontend",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:3000/ || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "essential": true
+    }
+  ]
+}

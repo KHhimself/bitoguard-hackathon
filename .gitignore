@@ -46,3 +46,16 @@ yarn-error.log*
 *.zip
 *.tmp
 *:Zone.Identifier
+
+# DuckDB database files (runtime state, not source)
+*.duckdb
+*.duckdb.wal
+
+# Trained model binaries (large binaries; keep *.json metadata only)
+bitoguard_core/artifacts/models/*.pkl
+
+# Codex build-time event logs (keep task.md / final.txt summaries only)
+.orchestration/codex/*/events.jsonl
+
+# Raw event data from BitoPro (large binaries/zips)
+data/

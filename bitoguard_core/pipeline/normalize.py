@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import timezone
 
 import pandas as pd
 
@@ -80,8 +80,6 @@ def normalize_raw_to_canonical() -> None:
     ]
     for table_name in table_names:
         raw = store.read_table(f"raw.{table_name}")
-        if raw.empty:
-            continue
         primary_key = PRIMARY_KEYS[table_name]
         before = len(raw)
         canonical = _dedupe_latest(raw, primary_key)
@@ -98,11 +96,12 @@ def normalize_raw_to_canonical() -> None:
         store.replace_table(f"canonical.{table_name}", canonical)
 
     blacklist = store.read_table("raw.known_blacklist_users")
-    if not blacklist.empty:
-        canonical_blacklist = _dedupe_latest(blacklist, "blacklist_entry_id")
+    canonical_blacklist = _dedupe_latest(blacklist, "blacklist_entry_id")
+    if "observed_at" in canonical_blacklist.columns:
         canonical_blacklist["observed_at"] = _to_timestamp(canonical_blacklist["observed_at"])
+    if "_sync_run_id" in canonical_blacklist.columns:
         canonical_blacklist = canonical_blacklist.drop(columns=["_sync_run_id", "_loaded_at"])
-        store.replace_table("canonical.blacklist_feed", canonical_blacklist)
+    store.replace_table("canonical.blacklist_feed", canonical_blacklist)
 
 
 if __name__ == "__main__":

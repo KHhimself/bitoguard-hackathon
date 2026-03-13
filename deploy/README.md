@@ -7,7 +7,7 @@
 在專案根目錄執行：
 
 ```bash
-cd /home/a0210/projects/sideProject/bitoguard_project_bundle
+cd .
 cp deploy/.env.compose.example .env
 docker compose up --build
 ```
@@ -17,17 +17,13 @@ docker compose up --build
 - <http://127.0.0.1:3000>
 - <http://127.0.0.1:8001/healthz>
 
-若你要重跑 sync pipeline，再額外啟動 mock API：
-
-```bash
-docker compose --profile sync up --build
-```
+若你要重跑 sync pipeline，backend 會直接讀取 `BITOGUARD_SOURCE_URL`（預設為 BitoPro AWS Event API），不需要另外啟動 mock API。
 
 ## 容器拓樸
 
 - `frontend`: Next.js production server，對外映射 `127.0.0.1:3000`
 - `backend`: FastAPI internal API，對外映射 `127.0.0.1:8001`
-- `mock-api`: 只有重跑 sync 流程時才需要，使用 `sync` profile 啟動
+- `mock-api`: 保留給本地 fixture 驗證或離線開發，不是預設 sync 來源
 
 `bitoguard_core/artifacts` 會以 bind mount 方式掛進 backend，保留 DuckDB 與模型 artifacts。
 
@@ -66,7 +62,7 @@ sudo usermod -aG docker $USER
 ```bash
 mkdir -p ~/apps
 tar -xzf bitoguard-project-bundle.tar.gz -C ~/apps
-cd ~/apps/bitoguard_project_bundle
+cd .
 cp deploy/.env.compose.example .env
 ```
 
@@ -80,7 +76,7 @@ curl http://127.0.0.1:8001/healthz
 
 ### 5. 設定 Nginx
 
-將 [bitoguard.conf](/home/a0210/projects/sideProject/bitoguard_project_bundle/deploy/ec2/nginx/bitoguard.conf) 複製到：
+將 [bitoguard.conf](deploy/ec2/nginx/bitoguard.conf) 複製到：
 
 ```bash
 sudo cp deploy/ec2/nginx/bitoguard.conf /etc/nginx/sites-available/bitoguard.conf
@@ -100,7 +96,7 @@ sudo systemctl reload nginx
 
 ### 7. 設成開機自啟
 
-將 [bitoguard-compose.service](/home/a0210/projects/sideProject/bitoguard_project_bundle/deploy/ec2/systemd/bitoguard-compose.service) 放到：
+將 [bitoguard-compose.service](deploy/ec2/systemd/bitoguard-compose.service) 放到：
 
 ```bash
 sudo cp deploy/ec2/systemd/bitoguard-compose.service /etc/systemd/system/bitoguard-compose.service
@@ -115,4 +111,3 @@ sudo systemctl enable --now bitoguard-compose.service
   - `bitoguard.duckdb`
   - 模型 artifacts
   - 匯出報表
-

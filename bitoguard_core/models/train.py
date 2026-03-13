@@ -4,16 +4,16 @@ from datetime import datetime, timezone
 
 from lightgbm import LGBMClassifier
 
-from models.common import encode_features, feature_columns, model_dir, save_json, save_pickle, training_dataset
+from models.common import encode_features, feature_columns, forward_date_splits, model_dir, save_json, save_pickle, training_dataset
 
 
 def train_model() -> dict:
     dataset = training_dataset().sort_values("snapshot_date").reset_index(drop=True)
     feature_cols = feature_columns(dataset)
-    unique_dates = sorted(dataset["snapshot_date"].dt.date.unique())
-    train_dates = set(unique_dates[:20])
-    valid_dates = set(unique_dates[20:25])
-    holdout_dates = set(unique_dates[25:])
+    date_splits = forward_date_splits(dataset["snapshot_date"])
+    train_dates = set(date_splits["train"])
+    valid_dates = set(date_splits["valid"])
+    holdout_dates = set(date_splits["holdout"])
 
     train_frame = dataset[dataset["snapshot_date"].dt.date.isin(train_dates)].copy()
     valid_frame = dataset[dataset["snapshot_date"].dt.date.isin(valid_dates)].copy()
@@ -36,13 +36,29 @@ def train_model() -> dict:
         random_state=42,
         scale_pos_weight=negatives / positives,
     )
+    eval_set = [(x_valid, y_valid)] if not valid_frame.empty else [(x_train, y_train)]
     model.fit(
         x_train,
         y_train,
-        eval_set=[(x_valid, y_valid)],
+        eval_set=eval_set,
         eval_metric="binary_logloss",
         callbacks=[],
     )
+
+    # ── Feature importance (gain-based) ──────────────────────────────────────
+    try:
+        gain_importance = model.booster_.feature_importance(importance_type="gain")
+        total_gain = max(1.0, float(gain_importance.sum()))
+        feature_importance = {
+            col: round(float(imp) / total_gain, 6)
+            for col, imp in sorted(
+                zip(encoded_columns, gain_importance.tolist()),
+                key=lambda x: -x[1],
+            )
+            if float(imp) > 0
+        }
+    except Exception:
+        feature_importance = {}
 
     version = f"lgbm_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     model_path = model_dir() / f"{version}.pkl"
@@ -57,6 +73,7 @@ def train_model() -> dict:
             "valid_dates": sorted(str(d) for d in valid_dates),
             "holdout_dates": sorted(str(d) for d in holdout_dates),
             "holdout_rows": len(x_holdout),
+            "feature_importance": feature_importance,
         },
         meta_path,
     )

@@ -68,13 +68,14 @@ def build_risk_diagnosis(user_id: str) -> dict:
         "SELECT * FROM features.feature_snapshots_user_day WHERE user_id = ? ORDER BY snapshot_date DESC LIMIT 1",
         (user_id,),
     )
+    _feat = features.iloc[0] if not features.empty else None
     graph_evidence = {
-        "shared_device_count": int(features.iloc[0]["shared_device_count"]),
-        "shared_bank_count": int(features.iloc[0]["shared_bank_count"]),
-        "shared_wallet_count": int(features.iloc[0]["shared_wallet_count"]),
-        "blacklist_1hop_count": int(features.iloc[0]["blacklist_1hop_count"]),
-        "blacklist_2hop_count": int(features.iloc[0]["blacklist_2hop_count"]),
-        "component_size": int(features.iloc[0]["component_size"]),
+        "shared_device_count": int(_feat["shared_device_count"]) if _feat is not None else 0,
+        "shared_bank_count": int(_feat["shared_bank_count"]) if _feat is not None else 0,
+        "shared_wallet_count": int(_feat["shared_wallet_count"]) if _feat is not None else 0,
+        "blacklist_1hop_count": int(_feat["blacklist_1hop_count"]) if _feat is not None else 0,
+        "blacklist_2hop_count": int(_feat["blacklist_2hop_count"]) if _feat is not None else 0,
+        "component_size": int(_feat["component_size"]) if _feat is not None else 0,
     }
     shap_factors = explain_user(user_id)
     shap_top = [

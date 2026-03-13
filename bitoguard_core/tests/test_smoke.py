@@ -106,7 +106,19 @@ def test_graph_endpoint_supports_hop_summary(tmp_path: Path, monkeypatch) -> Non
 def test_rescoring_preserves_alert_prediction_links(tmp_path: Path, monkeypatch) -> None:
     target_db = _configure_temp_db(tmp_path, monkeypatch)
     store = DuckDBStore(target_db)
-    latest_snapshot = store.fetch_df("SELECT MAX(snapshot_date) AS snapshot_date FROM ops.model_predictions").iloc[0]["snapshot_date"]
+    # Use the latest snapshot_date that has both predictions and alerts
+    latest_snapshot = store.fetch_df(
+        """
+        SELECT MAX(alerts.snapshot_date) AS snapshot_date
+        FROM ops.alerts AS alerts
+        INNER JOIN ops.model_predictions AS predictions
+            ON alerts.snapshot_date = predictions.snapshot_date
+        """
+    ).iloc[0]["snapshot_date"]
+    if latest_snapshot is None:
+        # No aligned alerts/predictions yet — run scoring to create them, then re-query
+        score_latest_snapshot()
+        latest_snapshot = store.fetch_df("SELECT MAX(snapshot_date) AS snapshot_date FROM ops.alerts").iloc[0]["snapshot_date"]
     before = store.fetch_df(
         """
         SELECT alert_id, prediction_id
@@ -135,3 +147,42 @@ def test_rescoring_preserves_alert_prediction_links(tmp_path: Path, monkeypatch)
     assert after.iloc[0]["alert_id"] == before.iloc[0]["alert_id"]
     assert after.iloc[0]["prediction_id"] == before.iloc[0]["prediction_id"]
     assert after.iloc[0]["risk_score"] is not None
+
+
+def test_metrics_model_endpoint_returns_full_report(tmp_path: Path, monkeypatch) -> None:
+    """GET /metrics/model returns a complete validation report with P@K and calibration."""
+    _configure_temp_db(tmp_path, monkeypatch)
+    client = TestClient(app)
+    resp = client.get("/metrics/model")
+    assert resp.status_code == 200
+    body = resp.json()
+    # Core metrics must be present
+    for field in ("model_version", "precision", "recall", "f1", "fpr", "average_precision"):
+        assert field in body, f"missing field: {field}"
+    # Precision@K / Recall@K added in QUALITY-009
+    assert "precision_at_k" in body, "precision_at_k missing from /metrics/model"
+    assert "recall_at_k" in body, "recall_at_k missing from /metrics/model"
+    assert isinstance(body["precision_at_k"], dict)
+    # Calibration
+    assert "calibration" in body
+    assert "brier_score" in body["calibration"]
+    # Feature importance
+    assert "feature_importance_top20" in body
+    assert isinstance(body["feature_importance_top20"], list)
+    # Threshold sensitivity
+    assert "threshold_sensitivity" in body
+    assert len(body["threshold_sensitivity"]) > 0
+
+
+def test_metrics_drift_endpoint_returns_health_status(tmp_path: Path, monkeypatch) -> None:
+    """GET /metrics/drift returns a drift health report with expected fields."""
+    _configure_temp_db(tmp_path, monkeypatch)
+    client = TestClient(app)
+    resp = client.get("/metrics/drift")
+    assert resp.status_code == 200
+    body = resp.json()
+    for field in ("snapshot_from", "snapshot_to", "total_checked", "total_drifted", "health_ok", "drifted_features"):
+        assert field in body, f"missing field: {field}"
+    assert isinstance(body["health_ok"], bool)
+    assert isinstance(body["drifted_features"], list)
+    assert isinstance(body["total_checked"], int)

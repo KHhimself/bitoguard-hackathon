@@ -1,0 +1,60 @@
+{
+  "family": "bitoguard-refresh-live",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/bitoguard-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/bitoguard-task-role",
+  "volumes": [
+    {
+      "name": "bitoguard-efs",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "<EFS_FILE_SYSTEM_ID>",
+        "rootDirectory": "/bitoguard",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "refresh",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/bitoguard-backend:latest",
+      "command": ["python", "pipeline/refresh_live.py"],
+      "environment": [
+        {
+          "name": "BITOGUARD_DB_PATH",
+          "value": "/mnt/efs/bitoguard.duckdb"
+        },
+        {
+          "name": "BITOGUARD_ARTIFACT_DIR",
+          "value": "/mnt/efs/artifacts"
+        },
+        {
+          "name": "BITOGUARD_SOURCE_URL",
+          "value": "https://aws-event-api.bitopro.com"
+        },
+        {
+          "name": "PYTHONPATH",
+          "value": "/app/bitoguard_core"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "bitoguard-efs",
+          "containerPath": "/mnt/efs",
+          "readOnly": false
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/bitoguard-refresh",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "essential": true
+    }
+  ]
+}
