@@ -265,10 +265,6 @@ def score_latest_snapshot_v2() -> pd.DataFrame:
     Returns same schema as score_latest_snapshot() for API compatibility.
     Rule engine runs via compat shim; IsolationForest provides anomaly_score.
     """
-    import json
-    import numpy as np
-    from pathlib import Path
-
     settings = load_settings()
     store    = DuckDBStore(settings.db_path)
 
