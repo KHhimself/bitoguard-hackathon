@@ -70,3 +70,36 @@ def test_twd_features_gap():
     u1 = result[result["user_id"] == "u1"].iloc[0]
     # Two deposits 1h apart → gap_min ≈ 60 minutes
     assert u1["twd_dep_gap_min"] == pytest.approx(60.0, abs=5.0)
+
+
+from features.crypto_features import compute_crypto_features
+
+
+def _crypto_df():
+    return pd.DataFrame([
+        {"user_id": "u1", "occurred_at": "2025-01-01T01:00:00+00:00", "direction": "deposit",
+         "amount_twd_equiv": 5000.0, "asset": "TRX", "network": "TRC20",
+         "wallet_id": "w1", "counterparty_wallet_id": "ext1"},
+        {"user_id": "u1", "occurred_at": "2025-01-01T03:00:00+00:00", "direction": "deposit",
+         "amount_twd_equiv": 3000.0, "asset": "ETH", "network": "ERC20",
+         "wallet_id": "w2", "counterparty_wallet_id": "ext2"},
+        {"user_id": "u1", "occurred_at": "2025-01-02T08:00:00+00:00", "direction": "withdrawal",
+         "amount_twd_equiv": 7000.0, "asset": "TRX", "network": "TRC20",
+         "wallet_id": "w1", "counterparty_wallet_id": "ext3"},
+    ])
+
+
+def test_crypto_features_columns():
+    result = compute_crypto_features(_crypto_df())
+    for col in ["crypto_all_count", "crypto_dep_count", "crypto_wdr_count",
+                "crypto_n_currencies", "crypto_trx_tx_share", "crypto_n_from_wallets",
+                "crypto_dep_gap_min"]:
+        assert col in result.columns, f"missing {col}"
+
+
+def test_crypto_features_u1():
+    result = compute_crypto_features(_crypto_df())
+    u1 = result[result["user_id"] == "u1"].iloc[0]
+    assert u1["crypto_all_count"] == 3
+    assert u1["crypto_n_currencies"] == 2  # TRX + ETH
+    assert u1["crypto_trx_tx_share"] == pytest.approx(2/3, abs=0.01)
