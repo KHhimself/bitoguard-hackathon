@@ -8,9 +8,11 @@ Note: graph_propagation (label-aware, 7 features) is NOT included here.
 It is added separately during model training (models/stacker.py) per-fold.
 """
 from __future__ import annotations
+import json
+from pathlib import Path
 import pandas as pd
 
-from features.profile_features  import compute_profile_features
+from features.profile_features  import compute_profile_features, build_profile_category_maps
 from features.twd_features      import compute_twd_features
 from features.crypto_features   import compute_crypto_features
 from features.swap_features     import compute_swap_features
@@ -75,6 +77,7 @@ def build_v2_features(
     logins:         pd.DataFrame,
     edges:          pd.DataFrame,
     snapshot_date:  pd.Timestamp | None = None,
+    category_maps:  dict | None = None,
 ) -> pd.DataFrame:
     """Assemble all label-free feature modules. Returns one row per user_id.
 
@@ -86,7 +89,8 @@ def build_v2_features(
     base = pd.DataFrame({"user_id": user_ids})
 
     module_entries: list[pd.DataFrame | None] = [
-        compute_profile_features(users, snapshot_date=snapshot_date),
+        compute_profile_features(users, snapshot_date=snapshot_date,
+                                  category_maps=category_maps),
         compute_twd_features(fiat, snapshot_date=snapshot_date),
         compute_crypto_features(crypto),
         compute_swap_features(trades),
@@ -153,8 +157,22 @@ def build_and_store_v2_features(
     if snapshot_date is None:
         snapshot_date = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
 
+    settings = load_settings()
+    artifact_dir = settings.artifact_dir
+    if store is None:
+        store = DuckDBStore(settings.db_path)
+
+    # Build and save deterministic category maps from current users population
+    category_maps = build_profile_category_maps(users)
+    maps_path = artifact_dir / "profile_category_maps.json"
+    maps_path.parent.mkdir(parents=True, exist_ok=True)
+    maps_path.write_text(
+        json.dumps(category_maps, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
     master = build_v2_features(users, fiat, crypto, trades, logins, edges,
-                               snapshot_date=snapshot_date)
+                               snapshot_date=snapshot_date,
+                               category_maps=category_maps)
     if master.empty:
         return master
 
@@ -162,9 +180,6 @@ def build_and_store_v2_features(
                   [make_id(f"v2_{uid[-4:]}") for uid in master["user_id"]])
     master.insert(2, "snapshot_date", snapshot_date.date())
     master.insert(3, "feature_version", FEATURE_VERSION_V2)
-
-    if store is None:
-        store = DuckDBStore(load_settings().db_path)
 
     store.replace_table("features.feature_snapshots_v2", master)
     return master

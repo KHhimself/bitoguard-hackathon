@@ -281,3 +281,37 @@ def test_twd_recency_days_is_deterministic():
     result = compute_twd_features(fiat, snapshot_date=snap_date)
     # 2025-05-01 to 2025-06-01 = 31 days
     assert abs(result["twd_recency_days"].iloc[0] - 31.0) < 1.0
+
+
+def test_profile_category_codes_deterministic_across_populations():
+    """Category codes must be stable across different populations."""
+    import pandas as pd
+    from features.profile_features import compute_profile_features, build_profile_category_maps
+
+    train_users = pd.DataFrame([
+        {"user_id": "u1", "kyc_level": "level1", "created_at": "2024-01-01",
+         "occupation": "engineer", "declared_source_of_funds": "salary",
+         "activity_window": "regular", "monthly_income_twd": 0.0},
+        {"user_id": "u2", "kyc_level": "level1", "created_at": "2024-01-01",
+         "occupation": "teacher", "declared_source_of_funds": "salary",
+         "activity_window": "regular", "monthly_income_twd": 0.0},
+    ])
+    maps = build_profile_category_maps(train_users)
+    train_result = compute_profile_features(train_users, category_maps=maps)
+    engineer_code = train_result.loc[train_result["user_id"] == "u1", "occupation_code"].iloc[0]
+
+    score_users = pd.DataFrame([
+        {"user_id": "u3", "kyc_level": "level1", "created_at": "2024-01-01",
+         "occupation": "engineer", "declared_source_of_funds": "salary",
+         "activity_window": "regular", "monthly_income_twd": 0.0},
+        {"user_id": "u4", "kyc_level": "level1", "created_at": "2024-01-01",
+         "occupation": "doctor", "declared_source_of_funds": "salary",
+         "activity_window": "regular", "monthly_income_twd": 0.0},
+    ])
+    score_result = compute_profile_features(score_users, category_maps=maps)
+
+    score_engineer_code = score_result.loc[score_result["user_id"] == "u3", "occupation_code"].iloc[0]
+    assert score_engineer_code == engineer_code, "engineer code must be stable across runs"
+
+    doctor_code = score_result.loc[score_result["user_id"] == "u4", "occupation_code"].iloc[0]
+    assert doctor_code == -1, "Unknown category must map to -1"
