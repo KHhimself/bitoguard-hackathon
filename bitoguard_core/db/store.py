@@ -48,6 +48,18 @@ class DuckDBStore:
         finally:
             conn.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """Atomic multi-statement write context manager. Acquires write lock."""
+        with _WRITE_LOCK, self.connect() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                yield conn
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
     def _bootstrap(self) -> None:
         with self.connect() as conn:
             conn.execute("CREATE SCHEMA IF NOT EXISTS raw")
@@ -75,16 +87,17 @@ class DuckDBStore:
 
     def replace_table(self, table_name: str, dataframe: pd.DataFrame) -> None:
         _validate_table_name(table_name)
-        with self.connect() as conn:
+        with _WRITE_LOCK, self.connect() as conn:
             conn.register("tmp_df", dataframe)
-            conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM tmp_df")
+            conn.execute(f"DELETE FROM {table_name}")
+            conn.execute(f"INSERT INTO {table_name} SELECT * FROM tmp_df")
             conn.unregister("tmp_df")
 
     def append_dataframe(self, table_name: str, dataframe: pd.DataFrame) -> None:
-        _validate_table_name(table_name)
         if dataframe.empty:
             return
-        with self.connect() as conn:
+        _validate_table_name(table_name)
+        with _WRITE_LOCK, self.connect() as conn:
             conn.register("tmp_df", dataframe)
             conn.execute(f"INSERT INTO {table_name} SELECT * FROM tmp_df")
             conn.unregister("tmp_df")
@@ -95,7 +108,7 @@ class DuckDBStore:
             return conn.execute(f"SELECT * FROM {table_name}").df()
 
     def execute(self, sql: str, params: tuple | None = None) -> None:
-        with self.connect() as conn:
+        with _WRITE_LOCK, self.connect() as conn:
             conn.execute(sql, params or ())
 
     def fetch_df(self, sql: str, params: tuple | None = None) -> pd.DataFrame:
