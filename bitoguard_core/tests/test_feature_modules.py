@@ -145,3 +145,29 @@ def test_trading_features_columns():
     result = compute_trading_features(_trades_df())
     for col in ["trade_count", "trade_buy_count", "trade_market_ratio", "trade_night_share"]:
         assert col in result.columns
+
+
+from features.ip_features import compute_ip_features
+
+
+def _login_df():
+    return pd.DataFrame([
+        {"user_id": "u1", "occurred_at": "2025-01-01T01:00:00+00:00", "ip_address": "1.2.3.4"},
+        {"user_id": "u1", "occurred_at": "2025-01-01T02:00:00+00:00", "ip_address": "1.2.3.4"},
+        {"user_id": "u1", "occurred_at": "2025-01-02T23:00:00+00:00", "ip_address": "5.6.7.8"},
+        {"user_id": "u2", "occurred_at": "2025-01-03T10:00:00+00:00", "ip_address": "9.9.9.9"},
+    ])
+
+
+def test_ip_features_columns():
+    result = compute_ip_features(_login_df())
+    for col in ["unique_ips", "ip_concentration", "ip_event_count", "ip_night_share"]:
+        assert col in result.columns
+
+
+def test_ip_features_u1():
+    result = compute_ip_features(_login_df())
+    u1 = result[result["user_id"] == "u1"].iloc[0]
+    assert u1["unique_ips"] == 2
+    assert u1["ip_concentration"] == pytest.approx(2/3, abs=0.01)  # top IP (1.2.3.4) has 2/3 events
+    assert u1["ip_night_share"] == pytest.approx(1/3, abs=0.01)    # 23:00 = night
