@@ -4,7 +4,7 @@
 Computes features from:
   1. IP bipartite graph (user <-> ip): degree-bucket distribution, robust to supernodes
   2. Wallet bipartite graph (user <-> wallet): same structure
-  3. Relation directed graph (user -> user via shared wallet): out/in degree, reciprocity
+  3. Peer graph (user -- user via shared wallet): symmetric peer count
 
 Degree buckets replace component_size and shared_device_count — they are not invalidated
 by a single supernode because each bucket counts entities at that degree, not the user's
@@ -101,9 +101,8 @@ def compute_bipartite_features(
         row["wallet_max_entity_deg"]    = float(max(wal_degs)) if wal_degs else 0.0
         row.update({f"wallet_{k}": v for k, v in _degree_buckets(wal_degs).items()})
 
-        row["rel_out_degree"]  = len(peers)
-        row["rel_in_degree"]   = len(peers)
-        row["rel_reciprocity"] = 1.0 if peers else 0.0
+        row["rel_peer_count"]  = len(peers)   # co-wallet user neighbors (symmetric)
+        row["rel_has_peers"]   = 1.0 if peers else 0.0
 
         rows.append(row)
 

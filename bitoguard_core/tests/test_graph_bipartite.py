@@ -17,7 +17,7 @@ def _edges_df():
 def test_bipartite_features_columns():
     result = compute_bipartite_features(_edges_df(), ["u1", "u2", "u3"])
     for col in ["ip_n_entities", "ip_total_event_count", "wallet_n_entities",
-                "rel_out_degree", "graph_is_isolated"]:
+                "rel_peer_count", "graph_is_isolated"]:
         assert col in result.columns
 
 
@@ -64,3 +64,22 @@ def test_propagation_no_leakage():
     u1 = result[result["user_id"] == "u1"].iloc[0]
     # u1 receives signal from u2 (training) via shared ip1 — this is correct, not leakage
     assert u1["prop_ip"] > 0.0
+
+
+def test_no_redundant_rel_in_degree():
+    """rel_in_degree must not appear in output — it was always identical to rel_out_degree."""
+    import pandas as pd
+    from features.graph_bipartite import compute_bipartite_features
+
+    edges = pd.DataFrame([
+        {"src_type": "user", "src_id": "u1", "dst_type": "wallet",
+         "dst_id": "w1", "relation_type": "owns_wallet", "edge_id": "e1"},
+        {"src_type": "user", "src_id": "u2", "dst_type": "wallet",
+         "dst_id": "w1", "relation_type": "owns_wallet", "edge_id": "e2"},
+    ])
+    result = compute_bipartite_features(edges, ["u1", "u2"])
+    assert "rel_in_degree" not in result.columns, (
+        "rel_in_degree is always == rel_out_degree and must be removed"
+    )
+    assert "rel_peer_count" in result.columns
+    assert "rel_has_peers" in result.columns
