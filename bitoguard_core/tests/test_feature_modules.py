@@ -203,3 +203,40 @@ def test_sequence_features_columns():
                 "crypto_dep_to_fiat_wdr_within_1h", "dwell_hours",
                 "early_3d_volume", "early_3d_count"]:
         assert col in result.columns
+
+
+from features.registry import build_v2_features
+
+
+def _registry_inputs():
+    users = pd.DataFrame([{
+        "user_id": "u1", "created_at": "2025-01-01T00:00:00+08:00",
+        "kyc_level": "level1", "occupation": "career_1",
+        "monthly_income_twd": 50000.0, "declared_source_of_funds": "income_source_2",
+        "activity_window": "web",
+    }])
+    fiat = pd.DataFrame([
+        {"user_id": "u1", "occurred_at": "2025-01-10T10:00:00+00:00",
+         "direction": "deposit", "amount_twd": 5000.0},
+    ])
+    crypto = pd.DataFrame(columns=["user_id", "occurred_at", "direction",
+                                   "amount_twd_equiv", "asset", "network",
+                                   "wallet_id", "counterparty_wallet_id"])
+    trades  = pd.DataFrame(columns=["user_id", "occurred_at", "side",
+                                    "base_asset", "quote_asset", "notional_twd", "order_type"])
+    logins  = pd.DataFrame(columns=["user_id", "occurred_at", "ip_address"])
+    edges   = pd.DataFrame(columns=["src_type", "src_id", "relation_type", "dst_type", "dst_id"])
+    return users, fiat, crypto, trades, logins, edges
+
+
+def test_registry_returns_user_row():
+    result = build_v2_features(*_registry_inputs())
+    assert "u1" in result["user_id"].values
+    assert len(result) == 1
+
+
+def test_registry_has_key_columns():
+    result = build_v2_features(*_registry_inputs())
+    for col in ["kyc_level_code", "twd_all_count", "crypto_all_count",
+                "fiat_dep_to_swap_buy_within_1h", "ip_n_entities", "unique_ips"]:
+        assert col in result.columns, f"missing: {col}"
