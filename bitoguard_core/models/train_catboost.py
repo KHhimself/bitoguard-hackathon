@@ -34,8 +34,7 @@ def _load_v2_training_dataset() -> "pd.DataFrame":
         LEFT JOIN ops.oracle_user_labels l ON f.user_id = l.user_id
         LEFT JOIN ped ON f.user_id = ped.user_id
         WHERE COALESCE(l.hidden_suspicious_label, 0) = 0
-           OR ped.ped IS NULL
-           OR f.snapshot_date >= ped.ped
+           OR (ped.ped IS NOT NULL AND f.snapshot_date >= ped.ped)
     """)
     dataset["snapshot_date"] = pd.to_datetime(dataset["snapshot_date"])
     dataset["hidden_suspicious_label"] = dataset["hidden_suspicious_label"].astype(int)

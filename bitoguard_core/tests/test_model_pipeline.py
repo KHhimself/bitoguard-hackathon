@@ -1087,3 +1087,83 @@ def test_graph_risk_score_is_reproducible() -> None:
     score_with_outlier = float(_graph_risk_score(frame_b).iloc[0])
     assert abs(score_alone - score_with_outlier) < 0.001, \
         f"Graph risk score changed when batch composition changed: {score_alone} vs {score_with_outlier}"
+
+
+def test_v2_training_query_excludes_positive_without_blacklist_date():
+    """
+    Positive users with no canonical.blacklist_feed entry must be excluded.
+    This test creates a minimal in-memory DuckDB reproducing the exact
+    CTE used in _load_v2_training_dataset() and verifies the WHERE clause.
+    """
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    conn.execute("CREATE SCHEMA canonical")
+    conn.execute("CREATE SCHEMA features")
+    conn.execute("CREATE SCHEMA ops")
+    conn.execute("""
+        CREATE TABLE features.feature_snapshots_v2 (
+            user_id VARCHAR, snapshot_date DATE,
+            feature_snapshot_id VARCHAR, feature_version VARCHAR
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE ops.oracle_user_labels (
+            user_id VARCHAR, hidden_suspicious_label INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE canonical.blacklist_feed (
+            user_id VARCHAR, observed_at TIMESTAMPTZ
+        )
+    """)
+    # u_neg: label=0, no blacklist → should be included
+    conn.execute("INSERT INTO features.feature_snapshots_v2 VALUES ('u_neg', '2025-01-01', 'f1', 'v2')")
+    # u_pos_dated: label=1, has blacklist entry → included from that date forward
+    conn.execute("INSERT INTO features.feature_snapshots_v2 VALUES ('u_pos_dated', '2025-01-01', 'f2', 'v2')")
+    conn.execute("INSERT INTO ops.oracle_user_labels VALUES ('u_pos_dated', 1)")
+    conn.execute("INSERT INTO canonical.blacklist_feed VALUES ('u_pos_dated', '2024-12-01 00:00:00+00')")
+    # u_pos_nodated: label=1, NO blacklist entry → must be EXCLUDED
+    conn.execute("INSERT INTO features.feature_snapshots_v2 VALUES ('u_pos_nodated', '2025-01-01', 'f3', 'v2')")
+    conn.execute("INSERT INTO ops.oracle_user_labels VALUES ('u_pos_nodated', 1)")
+
+    # First: prove the bug exists using the BUGGY query
+    buggy = conn.execute("""
+        WITH ped AS (
+            SELECT user_id, CAST(MIN(observed_at) AS DATE) AS ped
+            FROM canonical.blacklist_feed WHERE observed_at IS NOT NULL
+            GROUP BY user_id
+        )
+        SELECT f.user_id, COALESCE(l.hidden_suspicious_label, 0) AS hidden_suspicious_label
+        FROM features.feature_snapshots_v2 f
+        LEFT JOIN ops.oracle_user_labels l ON f.user_id = l.user_id
+        LEFT JOIN ped ON f.user_id = ped.user_id
+        WHERE COALESCE(l.hidden_suspicious_label, 0) = 0
+           OR ped.ped IS NULL
+           OR f.snapshot_date >= ped.ped
+    """).df()
+    assert "u_pos_nodated" in buggy["user_id"].values, (
+        "BUG CONFIRMED: buggy query includes positive user with no blacklist entry"
+    )
+
+    # Then: verify the fixed query excludes them
+    fixed = conn.execute("""
+        WITH ped AS (
+            SELECT user_id, CAST(MIN(observed_at) AS DATE) AS ped
+            FROM canonical.blacklist_feed WHERE observed_at IS NOT NULL
+            GROUP BY user_id
+        )
+        SELECT f.user_id, COALESCE(l.hidden_suspicious_label, 0) AS hidden_suspicious_label
+        FROM features.feature_snapshots_v2 f
+        LEFT JOIN ops.oracle_user_labels l ON f.user_id = l.user_id
+        LEFT JOIN ped ON f.user_id = ped.user_id
+        WHERE COALESCE(l.hidden_suspicious_label, 0) = 0
+           OR (ped.ped IS NOT NULL AND f.snapshot_date >= ped.ped)
+    """).df()
+
+    assert "u_neg" in fixed["user_id"].values
+    assert "u_pos_dated" in fixed["user_id"].values
+    assert "u_pos_nodated" not in fixed["user_id"].values, (
+        "Positive user with no blacklist entry must be excluded from training"
+    )
+    conn.close()

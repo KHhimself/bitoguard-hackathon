@@ -48,6 +48,20 @@ def _seed_v2(store: DuckDBStore) -> None:
             "evidence_tags": "",
         })
     store.replace_table("ops.oracle_user_labels", pd.DataFrame(labels))
+    # Provide blacklist_feed entries for positive users so the leakage-safe
+    # WHERE clause (ped.ped IS NOT NULL AND snapshot_date >= ped.ped) includes them.
+    blacklist_rows = []
+    for uid, label, _, _ in users:
+        if label == 1:
+            blacklist_rows.append({
+                "blacklist_entry_id": f"bl_{uid}",
+                "user_id": uid,
+                "observed_at": pd.Timestamp("2025-12-31T00:00:00Z"),
+                "source": "oracle",
+                "reason_code": "test",
+                "is_active": True,
+            })
+    store.replace_table("canonical.blacklist_feed", pd.DataFrame(blacklist_rows))
 
 
 def test_catboost_trains_and_saves(tmp_path, monkeypatch):
