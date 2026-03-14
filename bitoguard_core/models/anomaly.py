@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from sklearn.ensemble import IsolationForest
 
-from models.common import encode_features, feature_columns, forward_date_splits, model_dir, save_json, save_pickle, training_dataset
+from models.common import encode_features, feature_columns, forward_date_splits, model_dir, save_iforest, save_json, training_dataset
 
 
 def train_anomaly_model() -> dict:
@@ -20,9 +20,9 @@ def train_anomaly_model() -> dict:
     )
     model.fit(x_train)
     version = f"iforest_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    model_path = model_dir() / f"{version}.pkl"
+    model_path = model_dir() / f"{version}.joblib"
     meta_path = model_dir() / f"{version}.json"
-    save_pickle(model, model_path)
+    save_iforest(model, model_path)
     save_json(
         {
             "model_version": version,

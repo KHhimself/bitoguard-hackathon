@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import pickle
 from datetime import date
 from pathlib import Path
 from typing import Any
 
+import joblib
+import lightgbm as lgb
 import pandas as pd
 
 from config import load_settings
@@ -114,14 +116,43 @@ def model_dir() -> Path:
     return path
 
 
-def save_pickle(obj: Any, path: Path) -> None:
-    with path.open("wb") as handle:
-        pickle.dump(obj, handle)
+# ── LightGBM (text format — no pickle, inherently safe) ──────────────────────
+
+def save_lgbm(model: "lgb.LGBMClassifier", path: Path) -> None:
+    """Save a fitted LGBMClassifier using LightGBM's native text format."""
+    model.booster_.save_model(str(path))
 
 
-def load_pickle(path: Path) -> Any:
-    with path.open("rb") as handle:
-        return pickle.load(handle)
+def load_lgbm(path: Path) -> "lgb.Booster":
+    """Load a LightGBM Booster from its native text format."""
+    return lgb.Booster(model_file=str(path))
+
+
+# ── IsolationForest (joblib + SHA-256 integrity check) ───────────────────────
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save_iforest(model: object, path: Path) -> None:
+    """Save IsolationForest with joblib and write a SHA-256 integrity manifest."""
+    joblib.dump(model, path)
+    path.with_suffix(".sha256").write_text(_sha256_file(path), encoding="utf-8")
+
+
+def load_iforest(path: Path) -> object:
+    """Load IsolationForest after verifying SHA-256 integrity."""
+    sha_path = path.with_suffix(".sha256")
+    if not sha_path.exists():
+        raise FileNotFoundError(f"SHA-256 manifest not found for {path}")
+    expected = sha_path.read_text(encoding="utf-8").strip()
+    actual = _sha256_file(path)
+    if actual != expected:
+        raise ValueError(
+            f"Model file integrity check FAILED for {path}. "
+            "The file may have been tampered with. Retrain the model."
+        )
+    return joblib.load(path)
 
 
 def save_json(data: dict[str, Any], path: Path) -> None:

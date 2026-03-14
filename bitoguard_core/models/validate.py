@@ -15,15 +15,15 @@ from sklearn.metrics import (
 
 from config import load_settings
 from db.store import DuckDBStore, make_id, utc_now
-from models.common import encode_features, feature_columns, forward_date_splits, load_pickle, training_dataset
+from models.common import encode_features, feature_columns, forward_date_splits, load_lgbm, training_dataset
 
 
 def _load_latest(prefix: str) -> tuple[object, dict]:
     settings = load_settings()
-    model_files = sorted((settings.artifact_dir / "models").glob(f"{prefix}_*.pkl"))
+    model_files = sorted((settings.artifact_dir / "models").glob(f"{prefix}_*.lgbm"))
     model_path = model_files[-1]
     meta = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
-    return load_pickle(model_path), meta
+    return load_lgbm(model_path), meta
 
 
 def _precision_at_k(y_true: np.ndarray, scores: np.ndarray, k: int) -> float:
@@ -48,7 +48,7 @@ def _recall_at_k(y_true: np.ndarray, scores: np.ndarray, k: int) -> float:
 def _top_feature_importance(model: object, encoded_columns: list[str], top_n: int = 20) -> list[dict]:
     """Extract LightGBM feature importances (gain-based)."""
     try:
-        importances = model.booster_.feature_importance(importance_type="gain")
+        importances = model.feature_importance(importance_type="gain")
         pairs = sorted(
             zip(encoded_columns, importances.tolist()),
             key=lambda x: -x[1],
@@ -91,7 +91,7 @@ def validate_model() -> dict:
     feature_cols = feature_columns(holdout)
     encoded, enc_cols = encode_features(holdout, feature_cols, reference_columns=meta["encoded_columns"])
     y_true = holdout["hidden_suspicious_label"].astype(int).to_numpy()
-    probabilities = model.predict_proba(encoded)[:, 1]
+    probabilities = model.predict(encoded)
     preds = (probabilities >= 0.5).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, preds, labels=[0, 1]).ravel()
     precision = precision_score(y_true, preds, zero_division=0)

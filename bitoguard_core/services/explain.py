@@ -5,7 +5,7 @@ import json
 import pandas as pd
 
 from config import load_settings
-from models.common import encode_features, feature_columns, load_feature_table, load_pickle
+from models.common import encode_features, feature_columns, load_feature_table, load_lgbm
 
 
 def explain_user(user_id: str) -> list[dict]:
@@ -18,7 +18,7 @@ def explain_user(user_id: str) -> list[dict]:
     if frame.empty:
         return []
 
-    model_files = sorted((settings.artifact_dir / "models").glob("lgbm_*.pkl"))
+    model_files = sorted((settings.artifact_dir / "models").glob("lgbm_*.lgbm"))
     if not model_files:
         return []
     model_path = model_files[-1]
@@ -26,7 +26,7 @@ def explain_user(user_id: str) -> list[dict]:
     if not meta_path.exists():
         return []
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    model = load_pickle(model_path)
+    model = load_lgbm(model_path)
     cols = feature_columns(frame)
     encoded, encoded_columns = encode_features(frame, cols, reference_columns=meta["encoded_columns"])
     explainer = shap.TreeExplainer(model)

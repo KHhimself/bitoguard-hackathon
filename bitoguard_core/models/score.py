@@ -7,16 +7,16 @@ import pandas as pd
 
 from config import load_settings
 from db.store import DuckDBStore, make_id, utc_now
-from models.common import encode_features, feature_columns, load_feature_table, load_pickle
+from models.common import encode_features, feature_columns, load_feature_table, load_iforest, load_lgbm
 from models.rule_engine import evaluate_rules
 from services.alert_engine import generate_alerts
 
 
-def _load_latest_model(prefix: str) -> tuple[Path, dict]:
+def _load_latest_model(prefix: str, extension: str) -> tuple[Path, dict]:
     settings = load_settings()
-    model_files = sorted((settings.artifact_dir / "models").glob(f"{prefix}_*.pkl"))
+    model_files = sorted((settings.artifact_dir / "models").glob(f"{prefix}_*.{extension}"))
     if not model_files:
-        raise FileNotFoundError(f"No model found for prefix={prefix}")
+        raise FileNotFoundError(f"No model found for prefix={prefix}, extension={extension}")
     model_path = model_files[-1]
     meta = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
     return model_path, meta
@@ -46,15 +46,15 @@ def score_latest_snapshot() -> pd.DataFrame:
     scoring_frame = features[features["snapshot_date"] == latest_date].copy()
     rule_results = evaluate_rules(scoring_frame)
 
-    lgbm_path, lgbm_meta = _load_latest_model("lgbm")
-    anomaly_path, anomaly_meta = _load_latest_model("iforest")
+    lgbm_path, lgbm_meta = _load_latest_model("lgbm", "lgbm")
+    anomaly_path, anomaly_meta = _load_latest_model("iforest", "joblib")
     feature_cols = feature_columns(scoring_frame)
     x_score, _ = encode_features(scoring_frame, feature_cols, reference_columns=lgbm_meta["encoded_columns"])
     x_anomaly, _ = encode_features(scoring_frame, feature_cols, reference_columns=anomaly_meta["encoded_columns"])
 
-    lgbm = load_pickle(lgbm_path)
-    anomaly_model = load_pickle(anomaly_path)
-    model_probability = lgbm.predict_proba(x_score)[:, 1]
+    lgbm = load_lgbm(lgbm_path)
+    anomaly_model = load_iforest(anomaly_path)
+    model_probability = lgbm.predict(x_score)
     anomaly_raw = -anomaly_model.score_samples(x_anomaly)
     anomaly_score = (anomaly_raw - anomaly_raw.min()) / (anomaly_raw.max() - anomaly_raw.min() + 1e-9)
     graph_risk = _graph_risk_score(scoring_frame)

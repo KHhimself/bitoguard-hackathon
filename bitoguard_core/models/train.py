@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from lightgbm import LGBMClassifier
 
-from models.common import encode_features, feature_columns, forward_date_splits, model_dir, save_json, save_pickle, training_dataset
+from models.common import encode_features, feature_columns, forward_date_splits, model_dir, save_json, save_lgbm, training_dataset
 
 
 def train_model() -> dict:
@@ -61,9 +61,9 @@ def train_model() -> dict:
         feature_importance = {}
 
     version = f"lgbm_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    model_path = model_dir() / f"{version}.pkl"
+    model_path = model_dir() / f"{version}.lgbm"
     meta_path = model_dir() / f"{version}.json"
-    save_pickle(model, model_path)
+    save_lgbm(model, model_path)
     save_json(
         {
             "model_version": version,
