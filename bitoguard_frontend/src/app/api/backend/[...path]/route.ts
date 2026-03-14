@@ -4,7 +4,22 @@ const API_BASE = (process.env.BITOGUARD_INTERNAL_API_BASE ?? "http://127.0.0.1:8
 
 export const dynamic = "force-dynamic"
 
+const FRONTEND_ALLOWED_PATHS: ReadonlySet<string> = new Set([
+  "healthz",
+  "alerts",
+  "users",
+  "metrics",
+])
+
 async function proxy(request: NextRequest, path: string[]) {
+  const firstSegment = path[0]
+  if (!firstSegment || !FRONTEND_ALLOWED_PATHS.has(firstSegment)) {
+    return NextResponse.json(
+      { message: "Forbidden: this path is not accessible via the frontend proxy" },
+      { status: 403, headers: { "cache-control": "no-store" } },
+    )
+  }
+
   try {
     const upstreamUrl = new URL(`${API_BASE}/${path.join("/")}`)
     upstreamUrl.search = request.nextUrl.search
