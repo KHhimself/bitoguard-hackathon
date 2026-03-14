@@ -188,6 +188,17 @@ def test_metrics_drift_endpoint_returns_health_status(tmp_path: Path, monkeypatc
     assert isinstance(body["total_checked"], int)
 
 
+def test_graph_endpoint_does_not_load_full_edge_table(tmp_path: Path, monkeypatch) -> None:
+    """Graph endpoint must query edges by user_id, not load the whole table."""
+    import inspect
+    from api.main import _build_graph_payload
+    src = inspect.getsource(_build_graph_payload)
+    assert 'read_table("canonical.entity_edges")' not in src, \
+        "_build_graph_payload must not load the full entity_edges table"
+    assert "_load_neighborhood_edges" in src or "fetch_df" in src, \
+        "_build_graph_payload must use filtered SQL queries"
+
+
 def test_api_key_enforcement_when_configured(tmp_path: Path, monkeypatch) -> None:
     """When BITOGUARD_API_KEY is set, requests without the key get 401."""
     _configure_temp_db(tmp_path, monkeypatch)

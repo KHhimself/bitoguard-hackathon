@@ -61,9 +61,18 @@ def build_risk_diagnosis(user_id: str) -> dict:
     if predictions.empty:
         raise ValueError(f"No prediction found for user_id={user_id}")
     prediction = predictions.iloc[0].to_dict()
-    login = store.read_table("canonical.login_events")
-    crypto = store.read_table("canonical.crypto_transactions")
-    trade = store.read_table("canonical.trade_orders")
+    login = store.fetch_df(
+        "SELECT * FROM canonical.login_events WHERE user_id = ? ORDER BY occurred_at DESC LIMIT 50",
+        (user_id,),
+    )
+    crypto = store.fetch_df(
+        "SELECT * FROM canonical.crypto_transactions WHERE user_id = ? ORDER BY occurred_at DESC LIMIT 50",
+        (user_id,),
+    )
+    trade = store.fetch_df(
+        "SELECT * FROM canonical.trade_orders WHERE user_id = ? ORDER BY occurred_at DESC LIMIT 50",
+        (user_id,),
+    )
     features = store.fetch_df(
         "SELECT * FROM features.feature_snapshots_user_day WHERE user_id = ? ORDER BY snapshot_date DESC LIMIT 1",
         (user_id,),

@@ -97,8 +97,30 @@ def _records_to_dicts(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
+def _load_neighborhood_edges(store: DuckDBStore, user_id: str, max_hops: int) -> pd.DataFrame:
+    """Load entity edges for user's neighborhood without a full-table scan."""
+    one_hop = store.fetch_df(
+        "SELECT * FROM canonical.entity_edges WHERE src_id = ? OR dst_id = ?",
+        (user_id, user_id),
+    )
+    if one_hop.empty or max_hops < 2:
+        return one_hop
+    neighbor_ids = (
+        set(one_hop["src_id"].tolist()) | set(one_hop["dst_id"].tolist())
+    ) - {user_id}
+    if not neighbor_ids:
+        return one_hop
+    placeholders = ", ".join(["?"] * len(neighbor_ids))
+    nb = list(neighbor_ids)
+    two_hop = store.fetch_df(
+        f"SELECT * FROM canonical.entity_edges WHERE src_id IN ({placeholders}) OR dst_id IN ({placeholders})",
+        tuple(nb) * 2,
+    )
+    return pd.concat([one_hop, two_hop], ignore_index=True).drop_duplicates(subset=["edge_id"])
+
+
 def _build_graph_payload(store: DuckDBStore, user_id: str, max_hops: int, max_nodes: int = 120, max_edges: int = 240) -> dict[str, Any]:
-    edges = store.read_table("canonical.entity_edges")
+    edges = _load_neighborhood_edges(store, user_id, max_hops)
     focus_node_id = f"user:{user_id}"
     if edges.empty:
         return {
