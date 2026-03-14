@@ -1,0 +1,110 @@
+# bitoguard_core/features/graph_bipartite.py
+"""Label-free bipartite graph features (~40).
+
+Computes features from:
+  1. IP bipartite graph (user <-> ip): degree-bucket distribution, robust to supernodes
+  2. Wallet bipartite graph (user <-> wallet): same structure
+  3. Relation directed graph (user -> user via shared wallet): out/in degree, reciprocity
+
+Degree buckets replace component_size and shared_device_count — they are not invalidated
+by a single supernode because each bucket counts entities at that degree, not the user's
+transitive closure.
+
+Does NOT use labels. Safe to compute once for the entire dataset.
+"""
+from __future__ import annotations
+from collections import defaultdict
+import pandas as pd
+
+_DEGREE_BUCKETS = [1, 3, 10, 50, 200]   # upper bounds; anything above 200 → "over200"
+_IP_EDGE_TYPES     = frozenset({"login_from_ip"})
+_WALLET_EDGE_TYPES = frozenset({"owns_wallet", "crypto_transfer_to_wallet"})
+
+
+def _bucket_label(upper: int) -> str:
+    return f"deg_lte{upper}"
+
+
+def _degree_buckets(entity_degrees: list[int]) -> dict[str, int]:
+    out = {_bucket_label(b): 0 for b in _DEGREE_BUCKETS}
+    out["deg_over200"] = 0
+    for deg in entity_degrees:
+        placed = False
+        for b in _DEGREE_BUCKETS:
+            if deg <= b:
+                out[_bucket_label(b)] += 1
+                placed = True
+                break
+        if not placed:
+            out["deg_over200"] += 1
+    return out
+
+
+def compute_bipartite_features(
+    edges: pd.DataFrame,
+    user_ids: list[str],
+) -> pd.DataFrame:
+    """Compute ~40 label-free bipartite graph features for the given user_ids."""
+    user_set = set(user_ids)
+
+    ip_user_ents:     defaultdict[str, set[str]] = defaultdict(set)
+    ip_ent_users:     defaultdict[str, set[str]] = defaultdict(set)
+    wal_user_ents:    defaultdict[str, set[str]] = defaultdict(set)
+    wal_ent_users:    defaultdict[str, set[str]] = defaultdict(set)
+    rel_user_out:     defaultdict[str, set[str]] = defaultdict(set)
+
+    if not edges.empty:
+        for _, row in edges.iterrows():
+            src_t, src_id = row.get("src_type"), row.get("src_id")
+            dst_t, dst_id = row.get("dst_type"), row.get("dst_id")
+            rel            = row.get("relation_type", "")
+
+            if src_t != "user" or src_id not in user_set:
+                continue
+            if dst_t == "ip" and rel in _IP_EDGE_TYPES:
+                ip_user_ents[src_id].add(dst_id)
+                ip_ent_users[dst_id].add(src_id)
+            elif dst_t == "wallet" and rel in _WALLET_EDGE_TYPES:
+                wal_user_ents[src_id].add(dst_id)
+                wal_ent_users[dst_id].add(src_id)
+
+        # Relation: users sharing a wallet become peers
+        for ent, users in wal_ent_users.items():
+            user_list = list(users & user_set)
+            for i, u1 in enumerate(user_list):
+                for u2 in user_list[i + 1:]:
+                    rel_user_out[u1].add(u2)
+                    rel_user_out[u2].add(u1)
+
+    rows = []
+    for uid in user_ids:
+        ip_ents  = list(ip_user_ents.get(uid, set()))
+        wal_ents = list(wal_user_ents.get(uid, set()))
+        peers    = list(rel_user_out.get(uid, set()))
+
+        row: dict = {
+            "user_id":         uid,
+            "graph_is_isolated": int(not ip_ents and not wal_ents and not peers),
+        }
+
+        ip_degs = [len(ip_ent_users.get(e, set())) for e in ip_ents]
+        row["ip_n_entities"]        = len(ip_ents)
+        row["ip_total_event_count"] = sum(ip_degs)
+        row["ip_mean_entity_deg"]   = float(sum(ip_degs) / max(1, len(ip_degs)))
+        row["ip_max_entity_deg"]    = float(max(ip_degs)) if ip_degs else 0.0
+        row.update({f"ip_{k}": v for k, v in _degree_buckets(ip_degs).items()})
+
+        wal_degs = [len(wal_ent_users.get(e, set())) for e in wal_ents]
+        row["wallet_n_entities"]        = len(wal_ents)
+        row["wallet_total_event_count"] = sum(wal_degs)
+        row["wallet_mean_entity_deg"]   = float(sum(wal_degs) / max(1, len(wal_degs)))
+        row["wallet_max_entity_deg"]    = float(max(wal_degs)) if wal_degs else 0.0
+        row.update({f"wallet_{k}": v for k, v in _degree_buckets(wal_degs).items()})
+
+        row["rel_out_degree"]  = len(peers)
+        row["rel_in_degree"]   = len(peers)
+        row["rel_reciprocity"] = 1.0 if peers else 0.0
+
+        rows.append(row)
+
+    return pd.DataFrame(rows).fillna(0).reset_index(drop=True)
