@@ -163,3 +163,23 @@ def load_iforest(path: Path) -> object:
 
 def save_json(data: dict[str, Any], path: Path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ── Generic joblib (IsolationForest-style: joblib + SHA-256 integrity) ────────
+
+def save_joblib(model: object, path: Path) -> None:
+    """Save any sklearn-compatible model via joblib with SHA-256 integrity check."""
+    joblib.dump(model, path)
+    path.with_suffix(".sha256").write_text(_sha256_file(path), encoding="utf-8")
+
+
+def load_joblib(path: Path) -> object:
+    """Load a joblib model after verifying SHA-256 integrity."""
+    sha_path = path.with_suffix(".sha256")
+    if not sha_path.exists():
+        raise FileNotFoundError(f"SHA-256 manifest not found for {path}")
+    expected = sha_path.read_text(encoding="utf-8").strip()
+    file_bytes = path.read_bytes()
+    if hashlib.sha256(file_bytes).hexdigest() != expected:
+        raise ValueError(f"Integrity check FAILED for {path}. Retrain.")
+    return joblib.load(io.BytesIO(file_bytes))
