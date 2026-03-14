@@ -189,8 +189,8 @@ def _build_graph_features_fast(
         crypto_window = crypto_user[crypto_user["occurred_at"] < sd_end]
         transfer_counts = crypto_window.groupby("user_id").size().to_dict()
         distinct_targets = (
-            crypto_window.groupby("user_id")["to_wallet"].nunique().to_dict()
-            if "to_wallet" in crypto_window.columns else {}
+            crypto_window.groupby("user_id")["counterparty_wallet_id"].nunique().to_dict()
+            if "counterparty_wallet_id" in crypto_window.columns else {}
         )
 
         # Compute blacklisted_set bounded to this snapshot date to prevent leakage

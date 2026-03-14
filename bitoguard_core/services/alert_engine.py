@@ -30,7 +30,7 @@ def _sync_existing_alerts(store: DuckDBStore, predictions: pd.DataFrame) -> None
         return
 
     current_predictions = predictions[["user_id", "snapshot_date", "prediction_id", "risk_level"]].copy()
-    with store.connect() as conn:
+    with store.transaction() as conn:
         conn.register("current_predictions", current_predictions)
         conn.execute(
             """
@@ -45,6 +45,14 @@ def _sync_existing_alerts(store: DuckDBStore, predictions: pd.DataFrame) -> None
             """
         )
         conn.unregister("current_predictions")
+
+
+def _alert_id(prediction_id: str) -> str:
+    return f"alert_{prediction_id}"
+
+
+def _case_id(prediction_id: str) -> str:
+    return f"case_{prediction_id}"
 
 
 def generate_alerts() -> pd.DataFrame:
@@ -77,13 +85,14 @@ def generate_alerts() -> pd.DataFrame:
     alerts = []
     cases = []
     for _, row in new_high_risk.iterrows():
-        alert_id = make_id("alert")
-        case_id = make_id("case")
+        prediction_id = str(row["prediction_id"])
+        alert_id = _alert_id(prediction_id)
+        case_id = _case_id(prediction_id)
         alerts.append({
             "alert_id": alert_id, "user_id": row["user_id"],
             "snapshot_date": row["snapshot_date"], "created_at": utc_now(),
             "risk_level": row["risk_level"], "status": "open",
-            "prediction_id": row["prediction_id"], "report_path": None,
+            "prediction_id": prediction_id, "report_path": None,
         })
         cases.append({
             "case_id": case_id, "alert_id": alert_id,
@@ -95,12 +104,32 @@ def generate_alerts() -> pd.DataFrame:
         cases_df = pd.DataFrame(cases)
         with store.transaction() as conn:
             conn.register("alerts_df", alerts_df)
-            conn.execute("INSERT INTO ops.alerts SELECT * FROM alerts_df")
-            conn.unregister("alerts_df")
             conn.register("cases_df", cases_df)
-            conn.execute("INSERT INTO ops.cases SELECT * FROM cases_df")
+            conn.execute(
+                """
+                CREATE OR REPLACE TEMP TABLE new_alerts AS
+                SELECT alerts_df.*
+                FROM alerts_df
+                LEFT JOIN ops.alerts AS existing
+                    ON existing.prediction_id = alerts_df.prediction_id
+                WHERE existing.alert_id IS NULL
+                """
+            )
+            conn.execute("INSERT OR IGNORE INTO ops.alerts SELECT * FROM new_alerts")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO ops.cases
+                SELECT cases_df.*
+                FROM cases_df
+                INNER JOIN new_alerts ON new_alerts.alert_id = cases_df.alert_id
+                LEFT JOIN ops.cases AS existing ON existing.alert_id = cases_df.alert_id
+                WHERE existing.case_id IS NULL
+                """
+            )
+            inserted_alerts = conn.execute("SELECT * FROM new_alerts").df()
+            conn.unregister("alerts_df")
             conn.unregister("cases_df")
-        return alerts_df
+        return inserted_alerts
     return pd.DataFrame()
 
 
@@ -112,7 +141,10 @@ def apply_case_decision(alert_id: str, decision: str, actor: str = "analyst", no
     alert_row = store.fetch_df("SELECT * FROM ops.alerts WHERE alert_id = ?", (alert_id,))
     if alert_row.empty:
         raise ValueError(f"No alert found for alert_id={alert_id}")
-    case_row = store.fetch_df("SELECT * FROM ops.cases WHERE alert_id = ?", (alert_id,))
+    case_row = store.fetch_df(
+        "SELECT * FROM ops.cases WHERE alert_id = ? ORDER BY created_at DESC, case_id DESC LIMIT 1",
+        (alert_id,),
+    )
     if case_row.empty:
         raise ValueError(f"No case found for alert_id={alert_id}")
     case_id = case_row.iloc[0]["case_id"]

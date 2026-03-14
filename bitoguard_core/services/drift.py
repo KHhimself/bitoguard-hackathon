@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -53,6 +54,33 @@ class FeatureDriftResult:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, default=str)
+
+
+def _drift_cache_path(settings) -> Path:
+    return settings.artifact_dir / "drift_report.json"
+
+
+def _load_cached_result(cache_path: Path, date_from: str, date_to: str) -> FeatureDriftResult | None:
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("snapshot_from") != date_from or payload.get("snapshot_to") != date_to:
+        return None
+    return FeatureDriftResult(
+        snapshot_from=payload["snapshot_from"],
+        snapshot_to=payload["snapshot_to"],
+        drifted_features=payload.get("drifted_features", []),
+        total_checked=int(payload.get("total_checked", 0)),
+        total_drifted=int(payload.get("total_drifted", 0)),
+        health_ok=bool(payload.get("health_ok", True)),
+    )
+
+
+def _write_cached_result(cache_path: Path, result: FeatureDriftResult) -> None:
+    cache_path.write_text(result.to_json(), encoding="utf-8")
 
 
 def _relative_change(old: float, new: float) -> float:
@@ -150,9 +178,15 @@ def run_drift_check(db_path: str | None = None) -> FeatureDriftResult:
     """
     settings = load_settings()
     store = DuckDBStore(db_path or settings.db_path)
-
-    snapshots = store.read_table("features.feature_snapshots_user_30d")
-    if snapshots.empty or "snapshot_date" not in snapshots.columns:
+    snapshot_dates = store.fetch_df(
+        """
+        SELECT DISTINCT snapshot_date
+        FROM features.feature_snapshots_user_30d
+        WHERE snapshot_date IS NOT NULL
+        ORDER BY snapshot_date
+        """
+    )
+    if snapshot_dates.empty:
         logger.warning("No feature snapshots found; skipping drift check")
         return FeatureDriftResult(
             snapshot_from="",
@@ -163,8 +197,7 @@ def run_drift_check(db_path: str | None = None) -> FeatureDriftResult:
             health_ok=True,
         )
 
-    snapshots["snapshot_date"] = pd.to_datetime(snapshots["snapshot_date"])
-    dates = sorted(snapshots["snapshot_date"].unique())
+    dates = sorted(pd.to_datetime(snapshot_dates["snapshot_date"]).unique())
     if len(dates) < 2:
         logger.info("Only one snapshot date available; skipping drift check")
         return FeatureDriftResult(
@@ -177,10 +210,24 @@ def run_drift_check(db_path: str | None = None) -> FeatureDriftResult:
         )
 
     date_from, date_to = dates[-2], dates[-1]
-    df_from = snapshots[snapshots["snapshot_date"] == date_from]
-    df_to = snapshots[snapshots["snapshot_date"] == date_to]
+    cache_path = _drift_cache_path(settings)
+    cached = _load_cached_result(cache_path, str(date_from.date()), str(date_to.date()))
+    if cached is not None:
+        return cached
+
+    df_from = store.fetch_df(
+        "SELECT * FROM features.feature_snapshots_user_30d WHERE snapshot_date = ?",
+        (date_from.date(),),
+    )
+    df_to = store.fetch_df(
+        "SELECT * FROM features.feature_snapshots_user_30d WHERE snapshot_date = ?",
+        (date_to.date(),),
+    )
+    df_from["snapshot_date"] = pd.to_datetime(df_from["snapshot_date"])
+    df_to["snapshot_date"] = pd.to_datetime(df_to["snapshot_date"])
 
     result = detect_drift(df_from, df_to, str(date_from.date()), str(date_to.date()))
+    _write_cached_result(cache_path, result)
 
     if result.total_drifted > 0:
         logger.warning(

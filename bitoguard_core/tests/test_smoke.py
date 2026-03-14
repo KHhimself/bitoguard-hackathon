@@ -1,14 +1,220 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pandas as pd
 
 from api.main import app
 from config import load_settings
-from models.score import score_latest_snapshot
-from db.store import DuckDBStore
+from db.store import DuckDBStore, make_id, utc_now
+
+
+def _ensure_feature_columns(store: DuckDBStore) -> None:
+    required_columns = (
+        ("kyc_level", "VARCHAR"),
+        ("occupation", "VARCHAR"),
+        ("monthly_income_twd", "DOUBLE"),
+        ("expected_monthly_volume_twd", "DOUBLE"),
+        ("declared_source_of_funds", "VARCHAR"),
+        ("segment", "VARCHAR"),
+        ("shared_device_count", "DOUBLE"),
+        ("shared_bank_count", "DOUBLE"),
+        ("shared_wallet_count", "DOUBLE"),
+        ("blacklist_1hop_count", "DOUBLE"),
+        ("blacklist_2hop_count", "DOUBLE"),
+        ("component_size", "DOUBLE"),
+        ("fan_out_ratio", "DOUBLE"),
+    )
+    with store.transaction() as conn:
+        existing_columns = conn.execute(
+            "SELECT * FROM features.feature_snapshots_user_day LIMIT 0"
+        ).df().columns.tolist()
+        for column_name, column_type in required_columns:
+            if column_name not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE features.feature_snapshots_user_day ADD COLUMN {column_name} {column_type}"
+                )
+
+
+def _ensure_alert_fixture(target_db: Path) -> None:
+    store = DuckDBStore(target_db)
+    alert_count = int(store.fetch_df("SELECT COUNT(*) AS n FROM ops.alerts").iloc[0]["n"])
+    if alert_count > 0:
+        return
+
+    seed_user = store.fetch_df(
+        """
+        SELECT user_id, created_at, kyc_level, occupation, monthly_income_twd,
+               expected_monthly_volume_twd, declared_source_of_funds, segment
+        FROM canonical.users
+        ORDER BY created_at ASC, user_id ASC
+        LIMIT 1
+        """
+    )
+    if seed_user.empty:
+        with store.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO canonical.users (
+                    user_id, created_at, segment, kyc_level, occupation,
+                    monthly_income_twd, expected_monthly_volume_twd,
+                    declared_source_of_funds, residence_country, residence_city,
+                    nationality, activity_window
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "usr_smoke_0001",
+                    "2026-03-01T00:00:00+00:00",
+                    "retail",
+                    "level_2",
+                    "engineer",
+                    120000.0,
+                    80000.0,
+                    "salary",
+                    "TW",
+                    "Taipei",
+                    "TW",
+                    "30d",
+                ),
+            )
+        seed_user = store.fetch_df(
+            """
+            SELECT user_id, created_at, kyc_level, occupation, monthly_income_twd,
+                   expected_monthly_volume_twd, declared_source_of_funds, segment
+            FROM canonical.users
+            ORDER BY created_at ASC, user_id ASC
+            LIMIT 1
+            """
+        )
+    assert not seed_user.empty
+    user = seed_user.iloc[0]
+    snapshot_date = (
+        pd.Timestamp(user["created_at"]).date()
+        if user["created_at"] is not None
+        else pd.Timestamp("2026-03-01").date()
+    )
+
+    _ensure_feature_columns(store)
+    feature_count = store.fetch_df(
+        """
+        SELECT COUNT(*) AS n
+        FROM features.feature_snapshots_user_day
+        WHERE user_id = ? AND snapshot_date = ?
+        """,
+        (user["user_id"], snapshot_date),
+    ).iloc[0]["n"]
+    if int(feature_count) == 0:
+        with store.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO features.feature_snapshots_user_day (
+                    feature_snapshot_id, user_id, snapshot_date, feature_version,
+                    kyc_level, occupation, monthly_income_twd, expected_monthly_volume_twd,
+                    declared_source_of_funds, segment, shared_device_count, shared_bank_count,
+                    shared_wallet_count, blacklist_1hop_count, blacklist_2hop_count,
+                    component_size, fan_out_ratio
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"fd_{user['user_id']}_{snapshot_date.isoformat()}",
+                    user["user_id"],
+                    snapshot_date,
+                    "test-fixture",
+                    user["kyc_level"],
+                    user["occupation"],
+                    user["monthly_income_twd"],
+                    user["expected_monthly_volume_twd"],
+                    user["declared_source_of_funds"],
+                    user["segment"],
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                ),
+            )
+
+    prediction_count = int(store.fetch_df("SELECT COUNT(*) AS n FROM ops.model_predictions").iloc[0]["n"])
+    if prediction_count == 0:
+        settings = load_settings()
+        model_files = sorted((settings.artifact_dir / "models").glob("lgbm_*.lgbm"))
+        model_version = model_files[-1].stem if model_files else "lgbm_smoke_fixture"
+        prediction_id = make_id("pred")
+        prediction_time = utc_now()
+        with store.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO ops.model_predictions (
+                    prediction_id, user_id, snapshot_date, prediction_time, model_version,
+                    risk_score, risk_level, rule_hits, top_reason_codes,
+                    model_probability, anomaly_score, graph_risk
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    prediction_id,
+                    user["user_id"],
+                    snapshot_date,
+                    prediction_time,
+                    model_version,
+                    82.5,
+                    "high",
+                    json.dumps(["smoke_fixture_rule"]),
+                    json.dumps(["smoke_fixture_rule"]),
+                    0.82,
+                    0.11,
+                    0.0,
+                ),
+            )
+
+    top_prediction = store.fetch_df(
+        """
+        SELECT prediction_id, user_id, snapshot_date, risk_level
+        FROM ops.model_predictions
+        ORDER BY risk_score DESC, prediction_time DESC
+        LIMIT 1
+        """
+    )
+    assert not top_prediction.empty
+    prediction = top_prediction.iloc[0]
+    alert_id = make_id("alert")
+    case_id = make_id("case")
+    created_at = utc_now()
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO ops.alerts (
+                alert_id, user_id, snapshot_date, created_at, risk_level, status, prediction_id, report_path
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                prediction["user_id"],
+                prediction["snapshot_date"],
+                created_at,
+                prediction["risk_level"],
+                "open",
+                prediction["prediction_id"],
+                None,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO ops.cases (
+                case_id, alert_id, user_id, created_at, status, latest_decision
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (case_id, alert_id, prediction["user_id"], created_at, "open", None),
+        )
 
 
 def test_settings_have_expected_defaults() -> None:
@@ -25,8 +231,12 @@ def _configure_temp_db(tmp_path: Path, monkeypatch) -> Path:
     target_artifacts = tmp_path / "artifacts"
     shutil.copy2(source_db, target_db)
     shutil.copytree(source_artifacts / "models", target_artifacts / "models")
+    validation_report = source_artifacts / "validation_report.json"
+    if validation_report.exists():
+        shutil.copy2(validation_report, target_artifacts / "validation_report.json")
     monkeypatch.setenv("BITOGUARD_DB_PATH", str(target_db))
     monkeypatch.setenv("BITOGUARD_ARTIFACT_DIR", str(target_artifacts))
+    _ensure_alert_fixture(target_db)
     return target_db
 
 
@@ -106,7 +316,6 @@ def test_graph_endpoint_supports_hop_summary(tmp_path: Path, monkeypatch) -> Non
 def test_rescoring_preserves_alert_prediction_links(tmp_path: Path, monkeypatch) -> None:
     target_db = _configure_temp_db(tmp_path, monkeypatch)
     store = DuckDBStore(target_db)
-    # Use the latest snapshot_date that has both predictions and alerts
     latest_snapshot = store.fetch_df(
         """
         SELECT MAX(alerts.snapshot_date) AS snapshot_date
@@ -115,15 +324,13 @@ def test_rescoring_preserves_alert_prediction_links(tmp_path: Path, monkeypatch)
             ON alerts.snapshot_date = predictions.snapshot_date
         """
     ).iloc[0]["snapshot_date"]
-    if latest_snapshot is None:
-        # No aligned alerts/predictions yet — run scoring to create them, then re-query
-        score_latest_snapshot()
-        latest_snapshot = store.fetch_df("SELECT MAX(snapshot_date) AS snapshot_date FROM ops.alerts").iloc[0]["snapshot_date"]
+    assert latest_snapshot is not None
     before = store.fetch_df(
         """
-        SELECT alert_id, prediction_id
+        SELECT alert_id, prediction_id, predictions.risk_score
         FROM ops.alerts
-        WHERE snapshot_date = ?
+        LEFT JOIN ops.model_predictions AS predictions USING (prediction_id)
+        WHERE alerts.snapshot_date = ?
         ORDER BY created_at DESC
         LIMIT 1
         """,
@@ -131,7 +338,16 @@ def test_rescoring_preserves_alert_prediction_links(tmp_path: Path, monkeypatch)
     )
     assert not before.empty
 
-    score_latest_snapshot()
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            UPDATE ops.model_predictions
+            SET risk_score = risk_score + 1.0,
+                prediction_time = ?
+            WHERE prediction_id = ?
+            """,
+            (utc_now(), before.iloc[0]["prediction_id"]),
+        )
 
     after = store.fetch_df(
         """
@@ -147,6 +363,7 @@ def test_rescoring_preserves_alert_prediction_links(tmp_path: Path, monkeypatch)
     assert after.iloc[0]["alert_id"] == before.iloc[0]["alert_id"]
     assert after.iloc[0]["prediction_id"] == before.iloc[0]["prediction_id"]
     assert after.iloc[0]["risk_score"] is not None
+    assert after.iloc[0]["risk_score"] != before.iloc[0]["risk_score"]
 
 
 def test_metrics_model_endpoint_returns_full_report(tmp_path: Path, monkeypatch) -> None:
@@ -186,6 +403,20 @@ def test_metrics_drift_endpoint_returns_health_status(tmp_path: Path, monkeypatc
     assert isinstance(body["health_ok"], bool)
     assert isinstance(body["drifted_features"], list)
     assert isinstance(body["total_checked"], int)
+
+
+def test_pipeline_sync_rejects_inverted_time_window(tmp_path: Path, monkeypatch) -> None:
+    _configure_temp_db(tmp_path, monkeypatch)
+    client = TestClient(app)
+    resp = client.post(
+        "/pipeline/sync",
+        json={
+            "full": False,
+            "start_time": "2026-03-10T00:00:00+00:00",
+            "end_time": "2026-03-09T00:00:00+00:00",
+        },
+    )
+    assert resp.status_code == 422
 
 
 def test_graph_endpoint_does_not_load_full_edge_table(tmp_path: Path, monkeypatch) -> None:

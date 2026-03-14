@@ -25,7 +25,7 @@ cd bitoguard_core
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Run all 61 tests
+# Run the backend test suite
 make test
 
 # Full pipeline
@@ -41,7 +41,6 @@ PYTHONPATH=. uvicorn api.main:app --reload --port 8001
 |---------|------|-------------|
 | `bitoguard_core` | 8001 | FastAPI — pipeline, model, alerts, graph, metrics |
 | `bitoguard_frontend` | 3000 | Next.js — alerts dashboard, model ops, graph explorer |
-| `bitoguard_mock_api` | 8000 | Mock PostgREST for offline fixture testing |
 
 ### Frontend
 
@@ -50,19 +49,10 @@ cd bitoguard_frontend && npm install && npm run dev
 # Open http://localhost:3000
 ```
 
-### Mock API (offline development only)
-
-```bash
-cd bitoguard_mock_api
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
-
 ## Makefile Targets (run from `bitoguard_core/`)
 
 ```bash
-make test        # Run all 61 tests
+make test        # Run all 124 tests
 make sync        # Sync live BitoPro data
 make features    # Build feature snapshots + graph features
 make train       # Train LightGBM + IsolationForest
@@ -106,13 +96,13 @@ make docker-up
 | Graph schema | `docs/GRAPH_SCHEMA.md` |
 | Model card | `docs/MODEL_CARD.md` |
 | Data contract | `docs/DATA_CONTRACT.md` |
-| AWS deployment plan | `.orchestration/DEPLOYMENT_PLAN_AWS.md` |
+| Release readiness checklist | `docs/RELEASE_READINESS_CHECKLIST.md` |
 
-## Current Test Results
+## Validation
 
 ```
-bitoguard_core/:    61 passed  (unit + integration + smoke + drift + rule engine + API)
-bitoguard_mock_api/: 12 passed
+make test-quick
+cd bitoguard_frontend && npm run lint && npm run build
 ```
 
 ## AWS Deployment
@@ -125,4 +115,4 @@ Infrastructure artifacts are in `infra/aws/` and `scripts/`:
 ./scripts/deploy_aws.sh        # Register task defs + update ECS services
 ```
 
-See `docs/RUNBOOK_AWS.md` and `.orchestration/DEPLOYMENT_PLAN_AWS.md`.
+See `docs/RUNBOOK_AWS.md` and `docs/RELEASE_READINESS_CHECKLIST.md`.

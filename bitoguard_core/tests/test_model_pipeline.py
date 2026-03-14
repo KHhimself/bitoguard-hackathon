@@ -247,6 +247,56 @@ def _seed_refresh_incremental_source_tables(store: DuckDBStore) -> None:
         ]),
     )
     store.replace_table(
+        "canonical.user_device_links",
+        pd.DataFrame([
+            {
+                "link_id": "udl_direct",
+                "user_id": "u_direct",
+                "device_id": "device_shared",
+                "is_primary": True,
+                "first_seen_at": pd.Timestamp("2026-02-10T09:00:00Z"),
+                "last_seen_at": pd.Timestamp("2026-02-10T09:00:00Z"),
+            },
+            {
+                "link_id": "udl_neighbor",
+                "user_id": "u_neighbor",
+                "device_id": "device_shared",
+                "is_primary": True,
+                "first_seen_at": pd.Timestamp("2026-02-01T09:00:00Z"),
+                "last_seen_at": pd.Timestamp("2026-02-01T09:00:00Z"),
+            },
+            {
+                "link_id": "udl_untouched",
+                "user_id": "u_untouched",
+                "device_id": "device_other",
+                "is_primary": True,
+                "first_seen_at": pd.Timestamp("2026-02-01T12:00:00Z"),
+                "last_seen_at": pd.Timestamp("2026-02-01T12:00:00Z"),
+            },
+        ]),
+    )
+    store.replace_table(
+        "canonical.crypto_wallets",
+        pd.DataFrame([
+            {
+                "wallet_id": "wallet_direct",
+                "wallet_kind": "user_owned",
+                "user_id": "u_direct",
+                "asset": "BTC",
+                "network": "BTC",
+                "created_at": pd.Timestamp("2026-02-10T08:30:00Z"),
+            }
+        ]),
+    )
+    store.replace_table(
+        "canonical.user_bank_links",
+        pd.DataFrame(columns=["link_id", "user_id", "bank_account_id", "is_primary", "linked_at"]),
+    )
+    store.replace_table(
+        "canonical.bank_accounts",
+        pd.DataFrame(columns=["bank_account_id", "bank_code", "bank_name", "country", "currency", "opened_at"]),
+    )
+    store.replace_table(
         "canonical.fiat_transactions",
         pd.DataFrame([
             {
@@ -737,7 +787,7 @@ def test_refresh_live_watermark_advances_only_on_success(tmp_path: Path, monkeyp
     state = store.fetch_df("SELECT status, last_source_event_at FROM ops.refresh_state WHERE pipeline_name = 'refresh_live'")
 
     assert summary["status"] == "success"
-    assert summary["affected_user_count"] == 1
+    assert summary["affected_user_count"] == 2
     assert pd.Timestamp(state.iloc[0]["last_source_event_at"]).tz_convert("UTC").isoformat() == "2026-02-10T09:00:00+00:00"
 
     login_events = store.read_table("canonical.login_events")
@@ -783,7 +833,7 @@ def test_refresh_live_derives_affected_users_from_new_events_only(tmp_path: Path
 
     from pipeline import refresh_live as refresh_live_module
 
-    affected_user_ids = refresh_live_module._derive_affected_user_ids(
+    affected_user_ids = refresh_live_module._derive_direct_user_ids(
         store,
         pd.Timestamp("2026-02-09T00:00:00Z"),
         pd.Timestamp("2026-02-10T09:00:00Z"),
@@ -822,9 +872,9 @@ def test_refresh_live_upsert_only_touches_target_users_for_latest_snapshot_rows(
     previous_snapshot = pd.Timestamp("2026-02-09")
 
     assert summary["updated_row_counts"] == {
-        "features.graph_features": 1,
-        "features.feature_snapshots_user_day": 1,
-        "features.feature_snapshots_user_30d": 1,
+        "features.graph_features": 2,
+        "features.feature_snapshots_user_day": 2,
+        "features.feature_snapshots_user_30d": 2,
     }
 
     assert graph_df.loc[
@@ -938,10 +988,10 @@ def test_refresh_live_main_uses_incremental_path_without_training_chain(tmp_path
         "score_latest_snapshot",
     ]
     assert calls[0][1] == [pd.Timestamp("2026-02-10")]
-    assert calls[0][2] == {"u_direct"}
+    assert calls[0][2] == {"u_direct", "u_neighbor"}
     assert calls[0][3] is False
     assert calls[1][1] == [pd.Timestamp("2026-02-10")]
-    assert calls[1][2] == {"u_direct"}
+    assert calls[1][2] == {"u_direct", "u_neighbor"}
     assert calls[1][3] is False
     assert summary == printed
     assert summary["mode"] == "latest_snapshot_incremental"

@@ -49,6 +49,34 @@
           "value": "hidden_suspicious_label"
         },
         {
+          "name": "BITOGUARD_API_KEY",
+          "value": "<INTERNAL_SHARED_API_KEY>"
+        },
+        {
+          "name": "BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY",
+          "value": "true"
+        },
+        {
+          "name": "BITOGUARD_M0_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "BITOGUARD_M1_ENABLED",
+          "value": "false"
+        },
+        {
+          "name": "BITOGUARD_M3_ENABLED",
+          "value": "false"
+        },
+        {
+          "name": "BITOGUARD_M4_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "BITOGUARD_M5_ENABLED",
+          "value": "false"
+        },
+        {
           "name": "PYTHONPATH",
           "value": "/app/bitoguard_core"
         }

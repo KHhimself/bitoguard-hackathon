@@ -12,6 +12,7 @@ REGION="${2:?Usage: $0 <ACCOUNT_ID> <REGION>}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BACKEND_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/bitoguard-backend"
 FRONTEND_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/bitoguard-frontend"
+FRONTEND_BUILD_INTERNAL_API_BASE="${BITOGUARD_FRONTEND_BUILD_INTERNAL_API_BASE:-http://127.0.0.1:8001}"
 
 echo "[build_and_push] Authenticating Docker to ECR..."
 aws ecr get-login-password --region "${REGION}" | \
@@ -30,7 +31,7 @@ docker push "${BACKEND_IMAGE}:latest"
 echo "[build_and_push] Building frontend image..."
 docker build \
   -f "${REPO_ROOT}/bitoguard_frontend/Dockerfile" \
-  --build-arg "BITOGUARD_INTERNAL_API_BASE=http://bitoguard-backend.bitoguard.local:8001" \
+  --build-arg "BITOGUARD_INTERNAL_API_BASE=${FRONTEND_BUILD_INTERNAL_API_BASE}" \
   -t "bitoguard-frontend:latest" \
   "${REPO_ROOT}"
 

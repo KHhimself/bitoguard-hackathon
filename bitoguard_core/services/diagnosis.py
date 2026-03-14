@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import pandas as pd
 
@@ -51,31 +52,95 @@ def _timeline_summary(login: pd.DataFrame, crypto: pd.DataFrame, trade: pd.DataF
     return timeline[:10]
 
 
-def build_risk_diagnosis(user_id: str) -> dict:
-    settings = load_settings()
-    store = DuckDBStore(settings.db_path)
-    predictions = store.fetch_df(
-        "SELECT * FROM ops.model_predictions WHERE user_id = ? ORDER BY snapshot_date DESC LIMIT 1",
+def _load_prediction(
+    store: DuckDBStore,
+    user_id: str,
+    *,
+    prediction_id: str | None = None,
+    snapshot_date: object | None = None,
+) -> pd.DataFrame:
+    if prediction_id:
+        return store.fetch_df(
+            "SELECT * FROM ops.model_predictions WHERE prediction_id = ? LIMIT 1",
+            (prediction_id,),
+        )
+
+    if snapshot_date is not None:
+        return store.fetch_df(
+            """
+            SELECT *
+            FROM ops.model_predictions
+            WHERE user_id = ? AND snapshot_date = ?
+            ORDER BY prediction_time DESC
+            LIMIT 1
+            """,
+            (user_id, pd.Timestamp(snapshot_date).date()),
+        )
+
+    return store.fetch_df(
+        """
+        SELECT *
+        FROM ops.model_predictions
+        WHERE user_id = ?
+        ORDER BY snapshot_date DESC, prediction_time DESC
+        LIMIT 1
+        """,
         (user_id,),
     )
+
+
+def build_risk_diagnosis(
+    user_id: str,
+    *,
+    prediction_id: str | None = None,
+    snapshot_date: object | None = None,
+) -> dict:
+    settings = load_settings()
+    store = DuckDBStore(settings.db_path)
+    predictions = _load_prediction(store, user_id, prediction_id=prediction_id, snapshot_date=snapshot_date)
     if predictions.empty:
         raise ValueError(f"No prediction found for user_id={user_id}")
     prediction = predictions.iloc[0].to_dict()
+    prediction_snapshot_date = pd.Timestamp(predictions.iloc[0]["snapshot_date"]).date()
+    snapshot_end = pd.Timestamp(prediction_snapshot_date, tz="UTC") + timedelta(days=1)
     login = store.fetch_df(
-        "SELECT * FROM canonical.login_events WHERE user_id = ? ORDER BY occurred_at DESC LIMIT 50",
-        (user_id,),
+        """
+        SELECT *
+        FROM canonical.login_events
+        WHERE user_id = ? AND CAST(occurred_at AS TIMESTAMPTZ) < ?
+        ORDER BY CAST(occurred_at AS TIMESTAMPTZ) DESC
+        LIMIT 50
+        """,
+        (user_id, snapshot_end),
     )
     crypto = store.fetch_df(
-        "SELECT * FROM canonical.crypto_transactions WHERE user_id = ? ORDER BY occurred_at DESC LIMIT 50",
-        (user_id,),
+        """
+        SELECT *
+        FROM canonical.crypto_transactions
+        WHERE user_id = ? AND CAST(occurred_at AS TIMESTAMPTZ) < ?
+        ORDER BY CAST(occurred_at AS TIMESTAMPTZ) DESC
+        LIMIT 50
+        """,
+        (user_id, snapshot_end),
     )
     trade = store.fetch_df(
-        "SELECT * FROM canonical.trade_orders WHERE user_id = ? ORDER BY occurred_at DESC LIMIT 50",
-        (user_id,),
+        """
+        SELECT *
+        FROM canonical.trade_orders
+        WHERE user_id = ? AND CAST(occurred_at AS TIMESTAMPTZ) < ?
+        ORDER BY CAST(occurred_at AS TIMESTAMPTZ) DESC
+        LIMIT 50
+        """,
+        (user_id, snapshot_end),
     )
     features = store.fetch_df(
-        "SELECT * FROM features.feature_snapshots_user_day WHERE user_id = ? ORDER BY snapshot_date DESC LIMIT 1",
-        (user_id,),
+        """
+        SELECT *
+        FROM features.feature_snapshots_user_day
+        WHERE user_id = ? AND snapshot_date = ?
+        LIMIT 1
+        """,
+        (user_id, prediction_snapshot_date),
     )
     _feat = features.iloc[0] if not features.empty else None
     graph_evidence = {
@@ -86,7 +151,18 @@ def build_risk_diagnosis(user_id: str) -> dict:
         "blacklist_2hop_count": int(_feat["blacklist_2hop_count"]) if _feat is not None else 0,
         "component_size": int(_feat["component_size"]) if _feat is not None else 0,
     }
-    shap_factors = explain_user(user_id)
+    model_version = str(prediction.get("model_version") or "")
+    explain_model_version = next(
+        (part.split(":", 1)[-1] for part in model_version.split("+") if "lgbm_" in part),
+        None,
+    )
+    shap_factors = []
+    if explain_model_version is not None:
+        shap_factors = explain_user(
+            user_id,
+            snapshot_date=prediction_snapshot_date,
+            model_version=explain_model_version,
+        )
     shap_top = [
         {
             "feature": item["feature"],
@@ -113,6 +189,8 @@ def build_risk_diagnosis(user_id: str) -> dict:
             "risk_score": float(prediction["risk_score"]),
             "risk_level": prediction["risk_level"],
             "prediction_time": str(prediction["prediction_time"]),
+            "snapshot_date": str(prediction_snapshot_date),
+            "prediction_id": prediction.get("prediction_id"),
         },
         "shap_top_factors": shap_top,
         "rule_hits": rule_hits,

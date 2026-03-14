@@ -174,17 +174,24 @@ This section states what the BitoGuard system **can** and **cannot** claim as of
 | Item | Status | Notes |
 |------|--------|-------|
 | Docker images build locally | PASS | Tested in CI |
-| ECR push scripts available | PASS | `infra/ecr_push.sh` |
-| ECS task definitions prepared | PASS | `infra/ecs_task_def.json` |
+| ECR push scripts available | PASS | `scripts/build_and_push.sh` |
+| ECS task definitions prepared | PASS | `infra/aws/task-def-{backend,frontend,refresh}.json` |
 | Environment variable contract documented | PASS | `deploy/.env.compose.example` |
 | Clean production device_ids required for graph | CAVEAT | Graph disabled until device IDs are non-null |
-| M3/M5 disabled in production config | REQUIRED | Must set `BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY=true` and disable M3 scoring endpoint |
+| Honest scoring defaults enabled | REQUIRED | Keep M1/M3/M5 disabled and M0/M4 enabled in production |
 
 ### Required Environment Variables for Production
 
 ```bash
 # Required: Graph feature mode (must be true until Graph Recovery Plan completes)
 BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY=true
+
+# Required: Internal API auth between frontend proxy and backend
+BITOGUARD_API_KEY=<shared-internal-secret>
+BITOGUARD_INTERNAL_API_KEY=<shared-internal-secret>
+
+# Required: Disable non-honest rule layer in production
+BITOGUARD_M1_ENABLED=false
 
 # Required: Disable quarantined modules
 BITOGUARD_M3_ENABLED=false
@@ -204,11 +211,13 @@ Any production deployment that sets `BITOGUARD_M3_ENABLED=true`, `BITOGUARD_M5_E
 Before each production deployment, confirm:
 
 - [ ] `BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY=true` is set in the deployment environment.
+- [ ] `BITOGUARD_API_KEY` and `BITOGUARD_INTERNAL_API_KEY` are set to the same shared secret.
+- [ ] `BITOGUARD_M1_ENABLED=false` is set.
 - [ ] `BITOGUARD_M3_ENABLED=false` is set.
 - [ ] `BITOGUARD_M5_ENABLED=false` is set.
 - [ ] `PYTHONPATH=. pytest tests/ -v` passes with no failures.
 - [ ] Docker image builds without error: `docker build -t bitoguard-core .`
-- [ ] Health check endpoint responds: `GET /health` returns `{"status": "ok"}`.
+- [ ] Health check endpoint responds: `GET /healthz` returns `{"status": "ok"}`.
 - [ ] Dormancy baseline produces expected scores on a known test case.
 - [ ] `ops.data_quality_issues` is empty or contains only known/resolved issues.
 - [ ] Deployment reviewer has read and acknowledged the "Cannot Do" section above.

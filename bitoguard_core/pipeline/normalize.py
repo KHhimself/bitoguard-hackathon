@@ -63,6 +63,16 @@ def _dedupe_latest(frame: pd.DataFrame, primary_key: str) -> pd.DataFrame:
     return frame.copy()
 
 
+def _replace_table_in_transaction(conn, table_name: str, dataframe: pd.DataFrame) -> None:
+    if dataframe.empty:
+        conn.execute(f"DELETE FROM {table_name}")
+        return
+    conn.register("normalized_df", dataframe)
+    conn.execute(f"DELETE FROM {table_name}")
+    conn.execute(f"INSERT INTO {table_name} SELECT * FROM normalized_df")
+    conn.unregister("normalized_df")
+
+
 def normalize_raw_to_canonical() -> None:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
@@ -78,6 +88,7 @@ def normalize_raw_to_canonical() -> None:
         "user_bank_links",
         "crypto_wallets",
     ]
+    canonical_frames: dict[str, pd.DataFrame] = {}
     for table_name in table_names:
         raw = store.read_table(f"raw.{table_name}")
         primary_key = PRIMARY_KEYS[table_name]
@@ -93,7 +104,7 @@ def normalize_raw_to_canonical() -> None:
             canonical[column] = _to_timestamp(canonical[column])
         if "_sync_run_id" in canonical.columns:
             canonical = canonical.drop(columns=["_sync_run_id", "_loaded_at"])
-        store.replace_table(f"canonical.{table_name}", canonical)
+        canonical_frames[f"canonical.{table_name}"] = canonical
 
     blacklist = store.read_table("raw.known_blacklist_users")
     canonical_blacklist = _dedupe_latest(blacklist, "blacklist_entry_id")
@@ -101,7 +112,11 @@ def normalize_raw_to_canonical() -> None:
         canonical_blacklist["observed_at"] = _to_timestamp(canonical_blacklist["observed_at"])
     if "_sync_run_id" in canonical_blacklist.columns:
         canonical_blacklist = canonical_blacklist.drop(columns=["_sync_run_id", "_loaded_at"])
-    store.replace_table("canonical.blacklist_feed", canonical_blacklist)
+    canonical_frames["canonical.blacklist_feed"] = canonical_blacklist
+
+    with store.transaction() as conn:
+        for table_name, dataframe in canonical_frames.items():
+            _replace_table_in_transaction(conn, table_name, dataframe)
 
 
 if __name__ == "__main__":

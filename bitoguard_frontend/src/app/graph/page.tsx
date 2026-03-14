@@ -120,8 +120,9 @@ export default function GraphExplorerPage() {
   const [selectedRelations, setSelectedRelations] = useState<string[]>([...ALL_RELATIONS])
 
   const { data: alertsData, isLoading: isAlertsLoading, error: alertsError } = useQuery({
-    queryKey: ["alerts"],
-    queryFn: () => api.getAlerts({ page_size: 200 }),
+    queryKey: ["alerts", "all"],
+    queryFn: () => api.getAllAlerts({ page_size: 200 }),
+    staleTime: 60_000,
   })
 
   const userIds = useMemo(
@@ -137,6 +138,8 @@ export default function GraphExplorerPage() {
     queryKey: ["graph", activeSelectedUser, hops],
     queryFn: () => api.getUserGraph(activeSelectedUser, hops),
     enabled: !!activeSelectedUser,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   const { filteredNodes, filteredEdges, focusNodeId } = useMemo(() => {

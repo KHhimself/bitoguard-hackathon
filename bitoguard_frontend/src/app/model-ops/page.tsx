@@ -67,11 +67,13 @@ export default function ModelOpsPage() {
   const { data: metrics, isLoading, error } = useQuery({
     queryKey: ["modelMetrics"],
     queryFn: () => api.getModelMetrics() as Promise<ModelMetrics>,
+    staleTime: 300_000,
   })
   const { data: drift } = useQuery({
     queryKey: ["driftMetrics"],
     queryFn: () => api.getDriftMetrics() as Promise<DriftResult>,
-    refetchInterval: 60_000,
+    refetchInterval: 300_000,
+    refetchIntervalInBackground: false,
   })
 
   return (

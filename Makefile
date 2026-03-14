@@ -3,7 +3,7 @@
 # Usage:
 #   make help              Show this help
 #   make setup             Create Python venv and install dependencies
-#   make test              Run full test suite (85 tests)
+#   make test              Run full backend test suite
 #   make sync              Full data sync from live BitoPro API
 #   make features          Rebuild all feature snapshots
 #   make train             Train LightGBM + IsolationForest models
@@ -39,7 +39,7 @@ setup: ## Create .venv and install Python dependencies
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
-test: ## Run full test suite (85 tests)
+test: ## Run full backend test suite
 	cd $(CORE_DIR) && $(ACTIVATE) && PYTHONPATH=. python -m pytest tests/ -v
 
 test-quick: ## Run tests in quiet mode

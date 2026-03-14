@@ -81,7 +81,7 @@ def _detect_and_remove_supernodes(
     if edge_df.empty:
         return edge_df
 
-    threshold = max(2, int(total_users * SUPERNODE_USER_FRACTION_THRESHOLD))
+    threshold = max(10, int(total_users * SUPERNODE_USER_FRACTION_THRESHOLD))
     # Count distinct src_id (users) per dst node
     dst_user_counts = (
         edge_df[edge_df["src_type"] == "user"]

@@ -16,9 +16,10 @@ export default function UsersPage() {
   const [selectedUserId, setSelectedUserId] = useState<string>("")
 
   const { data: alertsData, isLoading: isAlertsLoading, error: alertsError } = useQuery({
-    queryKey: ["alerts"],
-    queryFn: () => api.getAlerts({ page_size: 200 }),
+    queryKey: ["alerts", "all"],
+    queryFn: () => api.getAllAlerts({ page_size: 200 }),
     select: (d) => d.items,
+    staleTime: 60_000,
   })
 
   const userIds = useMemo(
@@ -34,6 +35,7 @@ export default function UsersPage() {
     queryKey: ["user360", activeUserId],
     queryFn: () => api.getUser360(activeUserId) as Promise<Record<string, unknown>>,
     enabled: !!activeUserId,
+    staleTime: 60_000,
   })
 
   const user = profile?.user as Record<string, unknown> | undefined

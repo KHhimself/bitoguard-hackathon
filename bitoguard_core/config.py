@@ -30,6 +30,12 @@ class Settings:
     # Optional API key for X-API-Key header authentication.
     # When None (BITOGUARD_API_KEY unset), auth is disabled (dev mode).
     api_key: str | None
+    # Module toggles for the deployed scoring path.
+    m0_enabled: bool
+    m1_enabled: bool
+    m3_enabled: bool
+    m4_enabled: bool
+    m5_enabled: bool
 
 
 # Graph features disabled by default due to placeholder-device artifact (A7).
@@ -61,6 +67,13 @@ PLACEHOLDER_DEVICE_IDS: frozenset[str] = frozenset({
 SUPERNODE_USER_FRACTION_THRESHOLD: float = 0.01
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"false", "0", "no", "off"}
+
+
 def load_settings() -> Settings:
     artifact_dir = Path(os.getenv("BITOGUARD_ARTIFACT_DIR", str(DEFAULT_ARTIFACT_DIR))).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -81,4 +94,9 @@ def load_settings() -> Settings:
         graph_max_edges=int(os.getenv("BITOGUARD_GRAPH_MAX_EDGES", "240")),
         graph_trusted_only=graph_trusted_raw not in ("false", "0", "no"),
         api_key=os.getenv("BITOGUARD_API_KEY") or None,
+        m0_enabled=_env_flag("BITOGUARD_M0_ENABLED", True),
+        m1_enabled=_env_flag("BITOGUARD_M1_ENABLED", False),
+        m3_enabled=_env_flag("BITOGUARD_M3_ENABLED", False),
+        m4_enabled=_env_flag("BITOGUARD_M4_ENABLED", True),
+        m5_enabled=_env_flag("BITOGUARD_M5_ENABLED", False),
     )

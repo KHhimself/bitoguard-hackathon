@@ -373,90 +373,30 @@ def project_postgrest_payload(payload: dict[str, list[dict[str, Any]]]) -> dict[
 def build_synthetic_login_views(
     activity_rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build synthetic login_events, devices, and user_device_links from IP activity rows."""
+    """Build login_events from IP activity rows without fabricating device identity."""
     ordered = sorted(
         activity_rows,
         key=lambda item: (item["user_id"], item["occurred_at"], item["event_id"]),
     )
-    seen_devices_by_user: dict[str, set[str]] = defaultdict(set)
-    user_device_stats: dict[tuple[str, str], dict[str, Any]] = {}
-    device_stats: dict[str, dict[str, Any]] = {}
     login_events: list[dict[str, Any]] = []
 
     for item in ordered:
         ip_address = item.get("ip_address")
         if not ip_address:
             continue
-        uid = item["user_id"]
         occurred_at = item["occurred_at"]
-        device_id = f"dev_{ip_address}"
-        is_new_device = device_id not in seen_devices_by_user[uid]
-        seen_devices_by_user[uid].add(device_id)
         login_events.append({
             "login_id": f"login_{item['event_id']}",
-            "user_id": uid,
+            "user_id": item["user_id"],
             "occurred_at": format_source_datetime(occurred_at),
-            "device_id": device_id,
+            "device_id": None,
             "ip_address": ip_address,
             "ip_country": None,
             "ip_city": None,
             "is_vpn": False,
-            "is_new_device": is_new_device,
+            "is_new_device": False,
             "is_geo_jump": False,
             "success": True,
         })
 
-        if device_id not in device_stats:
-            device_stats[device_id] = {
-                "device_id": device_id,
-                "device_type": "synthetic_ip_device",
-                "os_family": None,
-                "app_channel": item.get("app_channel"),
-                "device_fingerprint": ip_address,
-                "first_seen_at": format_source_datetime(occurred_at),
-            }
-
-        key = (uid, device_id)
-        current = user_device_stats.get(key)
-        if current is None:
-            user_device_stats[key] = {
-                "link_id": f"udl_{uid}_{device_id}",
-                "user_id": uid,
-                "device_id": device_id,
-                "is_primary": False,
-                "first_seen_at": format_source_datetime(occurred_at),
-                "last_seen_at": format_source_datetime(occurred_at),
-                "_count": 1,
-            }
-        else:
-            current["_count"] += 1
-            current["last_seen_at"] = format_source_datetime(occurred_at)
-
-    primary_device_by_user: dict[str, str] = {}
-    for record in user_device_stats.values():
-        uid = record["user_id"]
-        existing = primary_device_by_user.get(uid)
-        if existing is None:
-            primary_device_by_user[uid] = record["device_id"]
-            continue
-        candidate = user_device_stats[(uid, record["device_id"])]
-        chosen = user_device_stats[(uid, existing)]
-        if candidate["_count"] > chosen["_count"]:
-            primary_device_by_user[uid] = record["device_id"]
-            continue
-        if candidate["_count"] == chosen["_count"] and candidate["first_seen_at"] < chosen["first_seen_at"]:
-            primary_device_by_user[uid] = record["device_id"]
-
-    user_device_links: list[dict[str, Any]] = []
-    for record in user_device_stats.values():
-        record["is_primary"] = primary_device_by_user.get(record["user_id"]) == record["device_id"]
-        user_device_links.append({
-            "link_id": record["link_id"],
-            "user_id": record["user_id"],
-            "device_id": record["device_id"],
-            "is_primary": record["is_primary"],
-            "first_seen_at": record["first_seen_at"],
-            "last_seen_at": record["last_seen_at"],
-        })
-
-    return login_events, list(device_stats.values()), user_device_links
+    return login_events, [], []

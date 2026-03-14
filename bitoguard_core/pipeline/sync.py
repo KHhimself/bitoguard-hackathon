@@ -10,6 +10,8 @@ from pipeline.sync_source import sync_source
 
 
 def run_sync(full: bool = False, start_time: datetime | None = None, end_time: datetime | None = None) -> str:
+    if start_time is not None and end_time is not None and start_time > end_time:
+        raise ValueError("start_time must be less than or equal to end_time")
     sync_run_id = sync_source(start_time=None if full else start_time, end_time=None if full else end_time)
     load_oracle()
     normalize_raw_to_canonical()

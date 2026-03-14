@@ -52,6 +52,9 @@ export interface Alert {
 export interface AlertsResponse {
   items: Alert[]
   total: number
+  page: number
+  page_size: number
+  has_next: boolean
 }
 
 export interface GraphNode {
@@ -106,8 +109,39 @@ export interface DiagnosisReport {
 // ── API functions ──────────────────────────────────────────
 
 export const api = {
-  getAlerts: (params?: { risk_level?: string; page_size?: number }) =>
+  getAlerts: (params?: { page?: number; risk_level?: string; status?: string; page_size?: number }) =>
     get<AlertsResponse>("/alerts", params as Record<string, string | number>),
+
+  getAllAlerts: async (params?: { risk_level?: string; status?: string; page_size?: number }) => {
+    const pageSize = params?.page_size ?? 200
+    let page = 1
+    const items: Alert[] = []
+    let total = 0
+
+    while (true) {
+      const response = await get<AlertsResponse>("/alerts", {
+        page,
+        page_size: pageSize,
+        ...(params?.risk_level ? { risk_level: params.risk_level } : {}),
+        ...(params?.status ? { status: params.status } : {}),
+      })
+      items.push(...response.items)
+      total = response.total
+      if (!response.has_next) {
+        return {
+          items,
+          total,
+          page,
+          page_size: pageSize,
+          has_next: false,
+        } satisfies AlertsResponse
+      }
+      page += 1
+    }
+  },
+
+  getAlert: (alertId: string) =>
+    get<Alert>(`/alerts/${alertId}`),
 
   getAlertReport: (alertId: string) =>
     get<DiagnosisReport>(`/alerts/${alertId}/report`),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import uuid
 from contextlib import contextmanager
@@ -11,6 +12,11 @@ import duckdb
 import pandas as pd
 
 from db.schema import CANONICAL_TABLE_SPECS, FEATURE_TABLE_SPECS, OPS_TABLE_DDLS, RAW_TABLE_SPECS, TableSpec
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 _ALLOWED_TABLES: frozenset[str] = frozenset(
     f"{spec.schema}.{spec.name}"
@@ -40,6 +46,11 @@ class DuckDBStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._bootstrap()
 
+    @property
+    def _lock_path(self) -> Path:
+        suffix = f"{self.db_path.suffix}.lock" if self.db_path.suffix else ".lock"
+        return self.db_path.with_suffix(suffix)
+
     @contextmanager
     def connect(self) -> Iterator[duckdb.DuckDBPyConnection]:
         conn = duckdb.connect(str(self.db_path))
@@ -49,31 +60,47 @@ class DuckDBStore:
             conn.close()
 
     @contextmanager
+    def _write_guard(self) -> Iterator[None]:
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with _WRITE_LOCK:
+            fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    @contextmanager
     def transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
         """Atomic multi-statement write context manager. Acquires write lock."""
-        with _WRITE_LOCK, self.connect() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                yield conn
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
+        with self._write_guard():
+            with self.connect() as conn:
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    yield conn
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
 
     def _bootstrap(self) -> None:
-        with self.connect() as conn:
-            conn.execute("CREATE SCHEMA IF NOT EXISTS raw")
-            conn.execute("CREATE SCHEMA IF NOT EXISTS canonical")
-            conn.execute("CREATE SCHEMA IF NOT EXISTS features")
-            conn.execute("CREATE SCHEMA IF NOT EXISTS ops")
-            for spec in RAW_TABLE_SPECS:
-                self._ensure_table(conn, spec, extra_columns=(("_sync_run_id", "VARCHAR"), ("_loaded_at", "TIMESTAMPTZ")))
-            for spec in CANONICAL_TABLE_SPECS:
-                self._ensure_table(conn, spec)
-            for spec in FEATURE_TABLE_SPECS:
-                self._ensure_table(conn, spec)
-            for ddl in OPS_TABLE_DDLS:
-                conn.execute(ddl)
+        with self._write_guard():
+            with self.connect() as conn:
+                conn.execute("CREATE SCHEMA IF NOT EXISTS raw")
+                conn.execute("CREATE SCHEMA IF NOT EXISTS canonical")
+                conn.execute("CREATE SCHEMA IF NOT EXISTS features")
+                conn.execute("CREATE SCHEMA IF NOT EXISTS ops")
+                for spec in RAW_TABLE_SPECS:
+                    self._ensure_table(conn, spec, extra_columns=(("_sync_run_id", "VARCHAR"), ("_loaded_at", "TIMESTAMPTZ")))
+                for spec in CANONICAL_TABLE_SPECS:
+                    self._ensure_table(conn, spec)
+                for spec in FEATURE_TABLE_SPECS:
+                    self._ensure_table(conn, spec)
+                for ddl in OPS_TABLE_DDLS:
+                    conn.execute(ddl)
 
     def _ensure_table(
         self,
@@ -87,23 +114,25 @@ class DuckDBStore:
 
     def replace_table(self, table_name: str, dataframe: pd.DataFrame) -> None:
         _validate_table_name(table_name)
-        with _WRITE_LOCK, self.connect() as conn:
-            if dataframe.empty:
-                # Preserve the existing table schema; just clear all rows.
-                conn.execute(f"DELETE FROM {table_name}")
-                return
-            conn.register("tmp_df", dataframe)
-            conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM tmp_df")
-            conn.unregister("tmp_df")
+        with self._write_guard():
+            with self.connect() as conn:
+                if dataframe.empty:
+                    # Preserve the existing table schema; just clear all rows.
+                    conn.execute(f"DELETE FROM {table_name}")
+                    return
+                conn.register("tmp_df", dataframe)
+                conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM tmp_df")
+                conn.unregister("tmp_df")
 
     def append_dataframe(self, table_name: str, dataframe: pd.DataFrame) -> None:
         if dataframe.empty:
             return
         _validate_table_name(table_name)
-        with _WRITE_LOCK, self.connect() as conn:
-            conn.register("tmp_df", dataframe)
-            conn.execute(f"INSERT INTO {table_name} SELECT * FROM tmp_df")
-            conn.unregister("tmp_df")
+        with self._write_guard():
+            with self.connect() as conn:
+                conn.register("tmp_df", dataframe)
+                conn.execute(f"INSERT INTO {table_name} SELECT * FROM tmp_df")
+                conn.unregister("tmp_df")
 
     def read_table(self, table_name: str) -> pd.DataFrame:
         _validate_table_name(table_name)
@@ -111,8 +140,9 @@ class DuckDBStore:
             return conn.execute(f"SELECT * FROM {table_name}").df()
 
     def execute(self, sql: str, params: tuple | None = None) -> None:
-        with _WRITE_LOCK, self.connect() as conn:
-            conn.execute(sql, params or ())
+        with self._write_guard():
+            with self.connect() as conn:
+                conn.execute(sql, params or ())
 
     def fetch_df(self, sql: str, params: tuple | None = None) -> pd.DataFrame:
         with self.connect() as conn:

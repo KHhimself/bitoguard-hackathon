@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from config import load_settings
 from db.store import DuckDBStore, make_id, utc_now
 from models.common import encode_features, feature_columns, load_feature_table, load_iforest, load_joblib, load_lgbm
+from models.dormancy import dormancy_series
 from models.rule_engine import evaluate_rules
 from services.alert_engine import generate_alerts
 
@@ -42,6 +44,68 @@ def _prediction_key(user_id: str, snapshot_date: object) -> tuple[str, object]:
     return (user_id, pd.Timestamp(snapshot_date).date())
 
 
+def _component_weights(settings) -> dict[str, float]:
+    weights = {
+        "m1": 0.20 if settings.m1_enabled else 0.0,
+        "m3": 0.45 if settings.m3_enabled else 0.0,
+        "m4": 0.35 if settings.m4_enabled else 0.0,
+        "m5": 0.10 if settings.m5_enabled else 0.0,
+    }
+    total = sum(weights.values())
+    if total == 0:
+        return weights
+    return {name: value / total for name, value in weights.items()}
+
+
+def _build_model_version(
+    *,
+    settings,
+    lgbm_meta: dict | None,
+    anomaly_meta: dict | None,
+) -> str:
+    components: list[str] = []
+    if settings.m0_enabled:
+        components.append("m0_dormancy")
+    if settings.m1_enabled:
+        components.append("m1_rules")
+    if settings.m3_enabled and lgbm_meta is not None:
+        components.append(lgbm_meta["model_version"])
+    if settings.m4_enabled and anomaly_meta is not None:
+        components.append(anomaly_meta["model_version"])
+    if settings.m5_enabled:
+        components.append("m5_graph")
+    return "+".join(components) if components else "score_disabled"
+
+
+def _composite_model_version(module_versions: list[str]) -> str:
+    if not module_versions:
+        return "manual_unconfigured"
+    return "+".join(module_versions)
+
+
+def _empty_rule_results(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame[["user_id", "snapshot_date"]].copy()
+    result["rule_score"] = 0.0
+    result["rule_hits"] = "[]"
+    return result
+
+
+def _reason_codes(row: pd.Series) -> str:
+    reasons: list[str] = []
+    if float(row.get("dormancy_score", 0.0) or 0.0) >= 1.0:
+        reasons.append("dormancy_baseline")
+    if row.get("rule_hits"):
+        reasons.extend(json.loads(row["rule_hits"]))
+    if float(row.get("anomaly_score", 0.0) or 0.0) >= 0.8:
+        reasons.append("anomaly_score_high")
+    if float(row.get("graph_risk", 0.0) or 0.0) > 0.0:
+        reasons.append("graph_risk")
+    if float(row.get("model_probability", 0.0) or 0.0) >= 0.8:
+        reasons.append("model_probability_high")
+    deduped = list(dict.fromkeys(reasons))
+    return json.dumps(deduped, ensure_ascii=False)
+
+
 def score_latest_snapshot() -> pd.DataFrame:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
@@ -50,44 +114,71 @@ def score_latest_snapshot() -> pd.DataFrame:
         raise ValueError("No feature snapshots found. Run feature build first.")
     latest_date = features["snapshot_date"].max()
     scoring_frame = features[features["snapshot_date"] == latest_date].copy()
-    rule_results = evaluate_rules(scoring_frame)
-
-    lgbm_path, lgbm_meta = _load_latest_model("lgbm", "lgbm")
-    anomaly_path, anomaly_meta = _load_latest_model("iforest", "joblib")
-    feature_cols = feature_columns(scoring_frame)
-    x_score, _ = encode_features(scoring_frame, feature_cols, reference_columns=lgbm_meta["encoded_columns"])
-    x_anomaly, _ = encode_features(scoring_frame, feature_cols, reference_columns=anomaly_meta["encoded_columns"])
-
-    lgbm = load_lgbm(lgbm_path)
-    anomaly_model = load_iforest(anomaly_path)
-    model_probability = lgbm.predict(x_score)
-    # lgb.Booster.predict returns probabilities for binary objectives — assert sanity
-    assert model_probability.min() >= 0.0 and model_probability.max() <= 1.0, (
-        "LightGBM predictions out of [0,1] range — model may not have binary objective"
-    )
-    anomaly_raw = -anomaly_model.score_samples(x_anomaly)
-    anomaly_score = (anomaly_raw - anomaly_raw.min()) / (anomaly_raw.max() - anomaly_raw.min() + 1e-9)
-    graph_risk = _graph_risk_score(scoring_frame)
-
     result = scoring_frame[["user_id", "snapshot_date"]].copy()
-    result["model_probability"] = model_probability
-    result["anomaly_score"] = anomaly_score
-    result["graph_risk"] = graph_risk
+    result["dormancy_score"] = dormancy_series(scoring_frame) if settings.m0_enabled else 0.0
+
+    module_versions: list[str] = []
+    if settings.m0_enabled:
+        module_versions.append("m0:dormancy_baseline")
+
+    rule_results = evaluate_rules(scoring_frame) if settings.m1_enabled else _empty_rule_results(scoring_frame)
+    if settings.m1_enabled:
+        module_versions.append("m1:behavioral_rules")
     result = result.merge(rule_results[["user_id", "snapshot_date", "rule_score", "rule_hits"]], on=["user_id", "snapshot_date"], how="left")
-    result["risk_score"] = (
-        0.35 * result["rule_score"]
-        + 0.45 * result["model_probability"]
-        + 0.10 * result["anomaly_score"]
-        + 0.10 * result["graph_risk"]
-    ) * 100.0
+    result["rule_score"] = result["rule_score"].fillna(0.0)
+    result["rule_hits"] = result["rule_hits"].fillna("[]")
+
+    feature_cols = feature_columns(scoring_frame)
+    result["model_probability"] = 0.0
+    result["anomaly_score"] = 0.0
+    result["graph_risk"] = 0.0
+
+    if settings.m3_enabled:
+        lgbm_path, lgbm_meta = _load_latest_model("lgbm", "lgbm")
+        x_score, _ = encode_features(scoring_frame, feature_cols, reference_columns=lgbm_meta["encoded_columns"])
+        lgbm = load_lgbm(lgbm_path)
+        model_probability = lgbm.predict(x_score)
+        assert model_probability.min() >= 0.0 and model_probability.max() <= 1.0, (
+            "LightGBM predictions out of [0,1] range — model may not have binary objective"
+        )
+        result["model_probability"] = model_probability
+        module_versions.append(f"m3:{lgbm_meta['model_version']}")
+
+    if settings.m4_enabled:
+        anomaly_path, anomaly_meta = _load_latest_model("iforest", "joblib")
+        x_anomaly, _ = encode_features(scoring_frame, feature_cols, reference_columns=anomaly_meta["encoded_columns"])
+        anomaly_model = load_iforest(anomaly_path)
+        anomaly_raw = -anomaly_model.score_samples(x_anomaly)
+        anomaly_score = (anomaly_raw - anomaly_raw.min()) / (anomaly_raw.max() - anomaly_raw.min() + 1e-9)
+        result["anomaly_score"] = anomaly_score
+        module_versions.append(f"m4:{anomaly_meta['model_version']}")
+
+    if settings.m5_enabled:
+        result["graph_risk"] = _graph_risk_score(scoring_frame)
+        module_versions.append("m5:graph_risk")
+
+    component_weights = {
+        "rule_score": 0.35 if settings.m1_enabled else 0.0,
+        "model_probability": 0.45 if settings.m3_enabled else 0.0,
+        "anomaly_score": 0.10 if settings.m4_enabled else 0.0,
+        "graph_risk": 0.10 if settings.m5_enabled else 0.0,
+    }
+    total_weight = sum(component_weights.values())
+    if total_weight > 0:
+        combined_score = sum(result[column] * weight for column, weight in component_weights.items()) / total_weight
+    else:
+        combined_score = pd.Series(0.0, index=result.index, dtype=float)
+    result["risk_score"] = combined_score * 100.0
+    if settings.m0_enabled:
+        result.loc[result["dormancy_score"] >= 1.0, "risk_score"] = 100.0
     result["risk_level"] = pd.cut(
         result["risk_score"],
         bins=[-1, 35, 60, 80, 100],
         labels=["low", "medium", "high", "critical"],
     ).astype(str)
-    result["top_reason_codes"] = result["rule_hits"]
+    result["top_reason_codes"] = result.apply(_reason_codes, axis=1)
     result["prediction_time"] = utc_now()
-    result["model_version"] = lgbm_meta["model_version"]
+    result["model_version"] = _composite_model_version(module_versions)
 
     existing_predictions = store.fetch_df(
         "SELECT prediction_id, user_id, snapshot_date FROM ops.model_predictions WHERE snapshot_date = ?",

@@ -20,7 +20,11 @@
       "environment": [
         {
           "name": "BITOGUARD_INTERNAL_API_BASE",
-          "value": "http://bitoguard-backend.bitoguard.local:8001"
+          "value": "<BACKEND_INTERNAL_API_BASE>"
+        },
+        {
+          "name": "BITOGUARD_INTERNAL_API_KEY",
+          "value": "<INTERNAL_SHARED_API_KEY>"
         },
         {
           "name": "NODE_ENV",

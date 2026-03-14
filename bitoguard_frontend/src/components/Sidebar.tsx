@@ -35,7 +35,9 @@ export function Sidebar() {
       <nav className="flex-1 px-3 py-4 space-y-0.5">
         <p className="px-2 pb-2 text-[11px] font-semibold text-[#9ca3af] uppercase tracking-wider">分析工具</p>
         {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const active = pathname === href || pathname.startsWith(href + "/")
+          const active = href === "/alerts"
+            ? pathname === href
+            : pathname === href || pathname.startsWith(href + "/")
           return (
             <Link
               key={href}

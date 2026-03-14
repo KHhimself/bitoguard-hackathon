@@ -17,6 +17,7 @@ from db.store import DuckDBStore, utc_now
 from features.build_features import build_feature_snapshots
 from features.graph_features import build_graph_features
 from models.score import score_latest_snapshot
+from pipeline.rebuild_edges import rebuild_edges
 
 _SAFE_COLUMN_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
@@ -87,7 +88,7 @@ def _write_refresh_state(
     details: dict[str, Any],
 ) -> None:
     details_json = json.dumps(details, ensure_ascii=False, default=_json_default)
-    with store.connect() as conn:
+    with store.transaction() as conn:
         conn.execute("DELETE FROM ops.refresh_state WHERE pipeline_name = ?", (PIPELINE_NAME,))
         conn.execute(
             """
@@ -121,22 +122,30 @@ def _current_source_event_at(store: DuckDBStore) -> pd.Timestamp | None:
         """
         SELECT MAX(event_at) AS current_source_event_at
         FROM (
-            SELECT MAX(occurred_at) AS event_at FROM canonical.login_events
+            SELECT MAX(TRY_CAST(occurred_at AS TIMESTAMPTZ)) AS event_at FROM canonical.login_events
             UNION ALL
-            SELECT MAX(occurred_at) AS event_at FROM canonical.fiat_transactions
+            SELECT MAX(TRY_CAST(occurred_at AS TIMESTAMPTZ)) AS event_at FROM canonical.fiat_transactions
             UNION ALL
-            SELECT MAX(occurred_at) AS event_at FROM canonical.trade_orders
+            SELECT MAX(TRY_CAST(occurred_at AS TIMESTAMPTZ)) AS event_at FROM canonical.trade_orders
             UNION ALL
-            SELECT MAX(occurred_at) AS event_at FROM canonical.crypto_transactions
+            SELECT MAX(TRY_CAST(occurred_at AS TIMESTAMPTZ)) AS event_at FROM canonical.crypto_transactions
             UNION ALL
-            SELECT MAX(observed_at) AS event_at FROM canonical.blacklist_feed
+            SELECT MAX(TRY_CAST(observed_at AS TIMESTAMPTZ)) AS event_at FROM canonical.blacklist_feed
+            UNION ALL
+            SELECT MAX(TRY_CAST(first_seen_at AS TIMESTAMPTZ)) AS event_at FROM canonical.user_device_links
+            UNION ALL
+            SELECT MAX(TRY_CAST(last_seen_at AS TIMESTAMPTZ)) AS event_at FROM canonical.user_device_links
+            UNION ALL
+            SELECT MAX(TRY_CAST(linked_at AS TIMESTAMPTZ)) AS event_at FROM canonical.user_bank_links
+            UNION ALL
+            SELECT MAX(TRY_CAST(created_at AS TIMESTAMPTZ)) AS event_at FROM canonical.crypto_wallets
         )
         """
     )
     return _coerce_timestamp(current.iloc[0]["current_source_event_at"])
 
 
-def _derive_affected_user_ids(
+def _derive_direct_user_ids(
     store: DuckDBStore,
     window_start: pd.Timestamp,
     current_source_event_at: pd.Timestamp,
@@ -163,6 +172,25 @@ def _derive_affected_user_ids(
             SELECT DISTINCT user_id
             FROM canonical.blacklist_feed
             WHERE user_id IS NOT NULL AND observed_at >= ? AND observed_at <= ?
+            UNION
+            SELECT DISTINCT user_id
+            FROM canonical.user_bank_links
+            WHERE user_id IS NOT NULL
+                AND TRY_CAST(linked_at AS TIMESTAMPTZ) >= ?
+                AND TRY_CAST(linked_at AS TIMESTAMPTZ) <= ?
+            UNION
+            SELECT DISTINCT user_id
+            FROM canonical.user_device_links
+            WHERE user_id IS NOT NULL AND (
+                (TRY_CAST(first_seen_at AS TIMESTAMPTZ) >= ? AND TRY_CAST(first_seen_at AS TIMESTAMPTZ) <= ?)
+                OR (TRY_CAST(last_seen_at AS TIMESTAMPTZ) >= ? AND TRY_CAST(last_seen_at AS TIMESTAMPTZ) <= ?)
+            )
+            UNION
+            SELECT DISTINCT user_id
+            FROM canonical.crypto_wallets
+            WHERE user_id IS NOT NULL
+                AND TRY_CAST(created_at AS TIMESTAMPTZ) >= ?
+                AND TRY_CAST(created_at AS TIMESTAMPTZ) <= ?
         )
         SELECT DISTINCT user_id
         FROM direct_users
@@ -180,9 +208,93 @@ def _derive_affected_user_ids(
             current_source_event_at,
             window_start,
             current_source_event_at,
+            window_start,
+            current_source_event_at,
+            window_start,
+            current_source_event_at,
+            window_start,
+            current_source_event_at,
+            window_start,
+            current_source_event_at,
         ),
     )
     return affected["user_id"].astype(str).tolist() if not affected.empty else []
+
+
+def _derive_affected_user_ids(
+    store: DuckDBStore,
+    window_start: pd.Timestamp,
+    current_source_event_at: pd.Timestamp,
+) -> list[str]:
+    return _derive_direct_user_ids(store, window_start, current_source_event_at)
+
+
+def _expand_graph_affected_user_ids(store: DuckDBStore, direct_user_ids: list[str]) -> list[str]:
+    if not direct_user_ids:
+        return []
+
+    placeholders = ", ".join(["?"] * len(direct_user_ids))
+    related = store.fetch_df(
+        f"""
+        SELECT DISTINCT related.src_id AS user_id
+        FROM canonical.entity_edges AS changed
+        INNER JOIN canonical.entity_edges AS related
+            ON related.dst_type = changed.dst_type
+            AND related.dst_id = changed.dst_id
+        WHERE changed.src_type = 'user'
+            AND related.src_type = 'user'
+            AND changed.src_id IN ({placeholders})
+        ORDER BY user_id
+        """,
+        tuple(direct_user_ids),
+    )
+    if related.empty:
+        return sorted(set(direct_user_ids))
+    return sorted(set(direct_user_ids) | set(related["user_id"].astype(str).tolist()))
+
+
+def _graph_rebuild_required(
+    store: DuckDBStore,
+    window_start: pd.Timestamp,
+    current_source_event_at: pd.Timestamp,
+) -> bool:
+    changed_graph_links = store.fetch_df(
+        """
+        SELECT COUNT(*) AS n
+        FROM (
+            SELECT link_id
+            FROM canonical.user_bank_links
+            WHERE TRY_CAST(linked_at AS TIMESTAMPTZ) >= ? AND TRY_CAST(linked_at AS TIMESTAMPTZ) <= ?
+            UNION ALL
+            SELECT link_id
+            FROM canonical.user_device_links
+            WHERE (
+                TRY_CAST(first_seen_at AS TIMESTAMPTZ) >= ? AND TRY_CAST(first_seen_at AS TIMESTAMPTZ) <= ?
+            ) OR (
+                TRY_CAST(last_seen_at AS TIMESTAMPTZ) >= ? AND TRY_CAST(last_seen_at AS TIMESTAMPTZ) <= ?
+            )
+            UNION ALL
+            SELECT wallet_id
+            FROM canonical.crypto_wallets
+            WHERE TRY_CAST(created_at AS TIMESTAMPTZ) >= ? AND TRY_CAST(created_at AS TIMESTAMPTZ) <= ?
+        )
+        """,
+        (
+            window_start,
+            current_source_event_at,
+            window_start,
+            current_source_event_at,
+            window_start,
+            current_source_event_at,
+            window_start,
+            current_source_event_at,
+        ),
+    )
+    if int(changed_graph_links.iloc[0]["n"]) > 0:
+        return True
+
+    edge_count = store.fetch_df("SELECT COUNT(*) AS n FROM canonical.entity_edges")
+    return int(edge_count.iloc[0]["n"]) == 0
 
 
 def _duckdb_type_for_series(series: pd.Series) -> str:
@@ -224,7 +336,7 @@ def _upsert_snapshot_rows(
     target_user_frame = pd.DataFrame({"user_id": target_user_ids})
     inserted_rows = int(len(dataframe))
 
-    with store.connect() as conn:
+    with store.transaction() as conn:
         existing_columns = _ensure_table_columns(conn, table_name, dataframe)
         conn.register("target_user_ids", target_user_frame)
         deleted_rows = int(conn.execute(
@@ -368,12 +480,22 @@ def refresh_live() -> dict[str, Any]:
             _stage_marker("no_op", started_at, no_op=True, reason="watermark_current")
             return summary
 
-        affected_user_ids = _derive_affected_user_ids(store, window_start, current_source_event_at)
+        direct_user_ids = _derive_direct_user_ids(store, window_start, current_source_event_at)
+        affected_user_ids = direct_user_ids
         latest_snapshot_date = current_source_event_at.tz_localize(None).normalize()
-        _stage_marker("affected_users", started_at, affected_user_count=len(affected_user_ids))
+        _stage_marker("affected_users", started_at, affected_user_count=len(direct_user_ids))
 
         predictions: pd.DataFrame | None = None
-        if affected_user_ids:
+        if direct_user_ids:
+            if _graph_rebuild_required(store, window_start, current_source_event_at):
+                rebuild_edges()
+            affected_user_ids = _expand_graph_affected_user_ids(store, direct_user_ids)
+            _stage_marker(
+                "affected_users_expanded",
+                started_at,
+                direct_user_count=len(direct_user_ids),
+                affected_user_count=len(affected_user_ids),
+            )
             graph_df = build_graph_features(
                 snapshot_dates=[latest_snapshot_date],
                 target_user_ids=affected_user_ids,

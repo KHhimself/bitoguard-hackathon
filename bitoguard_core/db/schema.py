@@ -209,4 +209,16 @@ OPS_TABLE_DDLS: tuple[str, ...] = (
         details_json JSON
     )
     """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ops_model_predictions_user_snapshot_idx
+    ON ops.model_predictions (user_id, snapshot_date)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ops_alerts_user_snapshot_idx
+    ON ops.alerts (user_id, snapshot_date)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ops_cases_alert_id_idx
+    ON ops.cases (alert_id)
+    """,
 )

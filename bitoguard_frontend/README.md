@@ -31,10 +31,11 @@ npm run dev
 
 ## 環境變數
 
-`.env.local` 目前只需要：
+`.env.local` 至少需要：
 
 ```bash
 BITOGUARD_INTERNAL_API_BASE=http://127.0.0.1:8001
+BITOGUARD_INTERNAL_API_KEY=bitoguard-dev-key
 ```
 
-若只想看已內建的 demo 資料，不需要先跑 `bitoguard_mock_api`。目前 sync pipeline 預設直接讀取 BitoPro AWS Event API；`bitoguard_mock_api` 只保留給本地 fixture 驗證或離線開發。
+若後端未設定 `BITOGUARD_API_KEY`，可以省略 `BITOGUARD_INTERNAL_API_KEY`。Compose 與部署範本預設會啟用後端 API key，因此前端代理必須帶同一把內部金鑰。

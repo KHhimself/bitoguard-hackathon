@@ -12,6 +12,13 @@ services:
       BITOGUARD_LABEL_SOURCE: ${BITOGUARD_LABEL_SOURCE:-hidden_suspicious_label}
       BITOGUARD_INTERNAL_API_PORT: 8001
       BITOGUARD_CORS_ORIGINS: ${BITOGUARD_CORS_ORIGINS:-http://localhost:3000}
+      BITOGUARD_API_KEY: ${BITOGUARD_API_KEY:-bitoguard-dev-key}
+      BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY: ${BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY:-true}
+      BITOGUARD_M0_ENABLED: ${BITOGUARD_M0_ENABLED:-true}
+      BITOGUARD_M1_ENABLED: ${BITOGUARD_M1_ENABLED:-false}
+      BITOGUARD_M3_ENABLED: ${BITOGUARD_M3_ENABLED:-false}
+      BITOGUARD_M4_ENABLED: ${BITOGUARD_M4_ENABLED:-true}
+      BITOGUARD_M5_ENABLED: ${BITOGUARD_M5_ENABLED:-false}
     volumes:
       - ./bitoguard_core/artifacts:/app/bitoguard_core/artifacts
     ports:
@@ -39,6 +46,7 @@ services:
     restart: unless-stopped
     environment:
       BITOGUARD_INTERNAL_API_BASE: http://backend:8001
+      BITOGUARD_INTERNAL_API_KEY: ${BITOGUARD_API_KEY:-bitoguard-dev-key}
       NODE_ENV: production
     depends_on:
       backend:

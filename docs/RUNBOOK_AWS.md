@@ -12,18 +12,18 @@ CloudFront (optional CDN for frontend)
    │
    ▼
 ALB (Application Load Balancer)
-   ├── /api/* → ECS Backend Service (bitoguard-backend)
    └── /*     → ECS Frontend Service (bitoguard-frontend)
 
 ECS Cluster (bitoguard)
-   ├── bitoguard-backend   (FastAPI, port 8001)
-   │     ├── Reads/writes: EFS volume (artifacts + DuckDB)
+   ├── bitoguard-backend   (FastAPI, port 8001, internal only)
+   │     ├── Reads/writes: EFS volume (artifacts + DuckDB + lock file)
    │     └── Fetches: https://aws-event-api.bitopro.com
-   └── bitoguard-frontend  (Next.js, port 3000)
-         └── Reads: backend API via ECS service discovery
+   ├── bitoguard-frontend  (Next.js, port 3000, public)
+   │     └── Proxies `/api/backend/*` to backend using BITOGUARD_INTERNAL_API_BASE
+   └── bitoguard-refresh-live (scheduled writer task, internal only)
 
 EFS (Elastic File System)
-   └── /app/bitoguard_core/artifacts/  (DuckDB + model artifacts)
+   └── /app/bitoguard_core/artifacts/  (DuckDB + model artifacts + lock file)
 
 ECR (Elastic Container Registry)
    ├── bitoguard-backend:latest
@@ -41,6 +41,8 @@ EventBridge Scheduler
 - AWS CLI configured with sufficient IAM permissions
 - Docker installed locally for image builds
 - `jq` installed for JSON parsing in scripts
+- A private backend URL for the frontend proxy, supplied via `BITOGUARD_INTERNAL_API_BASE`
+- A shared internal API key value supplied to both backend and frontend task definitions
 
 ## One-Time Setup
 
@@ -113,8 +115,9 @@ docker tag bitoguard-backend:latest <ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaw
 docker push <ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/bitoguard-backend:latest
 
 # Build and push frontend
+BITOGUARD_FRONTEND_BUILD_INTERNAL_API_BASE=http://<PRIVATE_BACKEND_BASE>:8001
 docker build -f bitoguard_frontend/Dockerfile \
-  --build-arg BITOGUARD_INTERNAL_API_BASE=http://bitoguard-backend.bitoguard.local:8001 \
+  --build-arg BITOGUARD_INTERNAL_API_BASE=$BITOGUARD_FRONTEND_BUILD_INTERNAL_API_BASE \
   -t bitoguard-frontend .
 docker tag bitoguard-frontend:latest <ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/bitoguard-frontend:latest
 docker push <ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/bitoguard-frontend:latest
@@ -141,6 +144,20 @@ Reference task definition templates are in `infra/aws/`:
 | BITOGUARD_ARTIFACT_DIR | /mnt/efs/artifacts |
 | BITOGUARD_SOURCE_URL | https://aws-event-api.bitopro.com |
 | BITOGUARD_INTERNAL_API_PORT | 8001 |
+| BITOGUARD_API_KEY | Shared secret used by the Next.js proxy |
+| BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY | true |
+| BITOGUARD_M0_ENABLED | true |
+| BITOGUARD_M1_ENABLED | false |
+| BITOGUARD_M3_ENABLED | false |
+| BITOGUARD_M4_ENABLED | true |
+| BITOGUARD_M5_ENABLED | false |
+
+### Frontend Task Environment Variables
+
+| Variable | Value |
+|----------|-------|
+| BITOGUARD_INTERNAL_API_BASE | Private backend base URL reachable from the frontend task |
+| BITOGUARD_INTERNAL_API_KEY | Same shared secret as `BITOGUARD_API_KEY` |
 
 ### Register Task Definitions
 
@@ -166,9 +183,10 @@ aws ecs create-service \
   --desired-count 1 \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[subnet-aaa,subnet-bbb],securityGroups=[sg-backend],assignPublicIp=DISABLED}" \
-  --load-balancers "targetGroupArn=arn:aws:elasticloadbalancing:...,containerName=backend,containerPort=8001" \
   --region ap-northeast-1
 ```
+
+Keep the backend service internal. Public traffic should reach the backend only through the frontend's `/api/backend/*` proxy path.
 
 ### Create Frontend Service
 
@@ -202,6 +220,8 @@ A separate `bitoguard-refresh-live` task definition should run:
 python pipeline/refresh_live.py
 ```
 
+Operational note: keep `bitoguard-backend` at `desired-count=1`. DuckDB writes are serialized through a shared lock file, but horizontal backend scaling still increases contention with the scheduled writer task.
+
 ## Deployment Script
 
 Use the convenience script for standard deployments:
@@ -219,8 +239,8 @@ This script:
 ## Health Checks
 
 ```bash
-# Backend health
-curl https://<ALB_DNS>/api/healthz
+# Public health via frontend proxy
+curl https://<ALB_DNS>/api/backend/healthz
 
 # Check ECS service status
 aws ecs describe-services \
@@ -243,10 +263,10 @@ aws logs tail /ecs/bitoguard-frontend --follow --region ap-northeast-1
 ## Manual Pipeline Trigger (via ECS RunTask)
 
 ```bash
-# Full sync
+# Full sync using the backend task definition
 aws ecs run-task \
   --cluster bitoguard \
-  --task-definition bitoguard-sync \
+  --task-definition bitoguard-backend \
   --overrides '{"containerOverrides":[{"name":"backend","command":["python","pipeline/sync.py","--full"]}]}' \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[subnet-aaa],securityGroups=[sg-backend],assignPublicIp=DISABLED}" \

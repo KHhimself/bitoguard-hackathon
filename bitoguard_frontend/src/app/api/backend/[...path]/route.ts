@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 
 const API_BASE = (process.env.BITOGUARD_INTERNAL_API_BASE ?? "http://127.0.0.1:8001").replace(/\/$/, "")
+const INTERNAL_API_KEY = process.env.BITOGUARD_INTERNAL_API_KEY ?? ""
 
 export const dynamic = "force-dynamic"
 
@@ -28,6 +29,9 @@ async function proxy(request: NextRequest, path: string[]) {
     const contentType = request.headers.get("content-type")
     if (contentType) {
       headers.set("content-type", contentType)
+    }
+    if (INTERNAL_API_KEY) {
+      headers.set("X-API-Key", INTERNAL_API_KEY)
     }
 
     const upstreamResponse = await fetch(upstreamUrl, {

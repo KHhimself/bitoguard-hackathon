@@ -81,18 +81,20 @@ def sync_source(start_time: datetime | None = None, end_time: datetime | None = 
         )
         summary: dict[str, int] = {}
         loaded_at = utc_now()
-        if is_full_sync:
+        with store.transaction() as conn:
+            if is_full_sync:
+                for endpoint in SOURCE_ENDPOINTS:
+                    conn.execute(f"DELETE FROM raw.{endpoint.name}")
             for endpoint in SOURCE_ENDPOINTS:
-                store.execute(f"DELETE FROM raw.{endpoint.name}")
-        for endpoint in SOURCE_ENDPOINTS:
-            dataframe = pd.DataFrame(payload[endpoint.name])
-            if dataframe.empty:
-                summary[endpoint.name] = 0
-                continue
-            dataframe["_sync_run_id"] = sync_run_id
-            dataframe["_loaded_at"] = loaded_at
-            store.append_dataframe(f"raw.{endpoint.name}", dataframe)
-            summary[endpoint.name] = len(dataframe)
+                dataframe = pd.DataFrame(payload[endpoint.name])
+                summary[endpoint.name] = len(dataframe)
+                if dataframe.empty:
+                    continue
+                dataframe["_sync_run_id"] = sync_run_id
+                dataframe["_loaded_at"] = loaded_at
+                conn.register("raw_df", dataframe)
+                conn.execute(f"INSERT INTO raw.{endpoint.name} SELECT * FROM raw_df")
+                conn.unregister("raw_df")
         store.execute(
             """
             UPDATE ops.sync_runs

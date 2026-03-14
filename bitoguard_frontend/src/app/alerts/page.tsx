@@ -21,10 +21,11 @@ const RISK_ZH: Record<NonNullable<RiskLevel>, string> = {
 
 export default function AlertCenterPage() {
   const [filter, setFilter] = useState<string>("all")
+  const [page, setPage] = useState<number>(1)
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["alerts", filter],
-    queryFn: () => api.getAlerts({ page_size: 200, ...(filter !== "all" ? { risk_level: filter } : {}) }),
+    queryKey: ["alerts", filter, page],
+    queryFn: () => api.getAlerts({ page, page_size: 50, ...(filter !== "all" ? { risk_level: filter } : {}) }),
   })
 
   const FILTERS = [
@@ -48,7 +49,10 @@ export default function AlertCenterPage() {
         {FILTERS.map((f) => (
           <button
             key={f.value}
-            onClick={() => setFilter(f.value)}
+            onClick={() => {
+              setFilter(f.value)
+              setPage(1)
+            }}
             className={`px-4 py-1.5 rounded-full text-[13px] font-medium border transition-colors ${
               filter === f.value
                 ? "bg-[#5c6bc0] text-white border-[#5c6bc0]"
@@ -124,6 +128,29 @@ export default function AlertCenterPage() {
           </table>
           {data.items.length === 0 && (
             <div className="text-center text-[#9ca3af] py-12">目前沒有符合條件的警示</div>
+          )}
+          {data.total > 0 && (
+            <div className="flex items-center justify-between border-t border-[#f4f6f9] px-4 py-3 text-[12px] text-[#6b7280]">
+              <span>
+                第 {page} 頁 / 共 {Math.max(1, Math.ceil(data.total / data.page_size))} 頁
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={page <= 1}
+                  className="rounded border border-[#e5e7eb] px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  上一頁
+                </button>
+                <button
+                  onClick={() => setPage((current) => current + 1)}
+                  disabled={!data.has_next}
+                  className="rounded border border-[#e5e7eb] px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  下一頁
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}

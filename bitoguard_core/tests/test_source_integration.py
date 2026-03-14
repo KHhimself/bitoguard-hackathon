@@ -123,45 +123,10 @@ def test_project_postgrest_payload_scales_and_derives_views() -> None:
         "2025-10-03T00:00:00+08:00",
         "2025-10-04T00:00:00+08:00",
     ]
-    assert [event["is_new_device"] for event in projected["login_events"]] == [True, False, True]
-
-    assert projected["devices"] == [
-        {
-            "device_id": "dev_ip1",
-            "device_type": "synthetic_ip_device",
-            "os_family": None,
-            "app_channel": None,
-            "device_fingerprint": "ip1",
-            "first_seen_at": "2025-10-02T00:00:00+08:00",
-        },
-        {
-            "device_id": "dev_ip2",
-            "device_type": "synthetic_ip_device",
-            "os_family": None,
-            "app_channel": None,
-            "device_fingerprint": "ip2",
-            "first_seen_at": "2025-10-04T00:00:00+08:00",
-        },
-    ]
-    assert len(projected["devices"]) == 2
-    assert projected["user_device_links"] == [
-        {
-            "link_id": "udl_100_dev_ip1",
-            "user_id": "100",
-            "device_id": "dev_ip1",
-            "is_primary": True,
-            "first_seen_at": "2025-10-02T00:00:00+08:00",
-            "last_seen_at": "2025-10-03T00:00:00+08:00",
-        },
-        {
-            "link_id": "udl_100_dev_ip2",
-            "user_id": "100",
-            "device_id": "dev_ip2",
-            "is_primary": False,
-            "first_seen_at": "2025-10-04T00:00:00+08:00",
-            "last_seen_at": "2025-10-04T00:00:00+08:00",
-        },
-    ]
+    assert [event["is_new_device"] for event in projected["login_events"]] == [False, False, False]
+    assert all(event["device_id"] is None for event in projected["login_events"])
+    assert projected["devices"] == []
+    assert projected["user_device_links"] == []
     assert projected["known_blacklist_users"][0]["observed_at"] == "2025-10-02T00:00:00+08:00"
     assert projected["known_blacklist_users"][0]["reason_code"] == "train_label_status_1"
     assert projected["bank_accounts"] == []

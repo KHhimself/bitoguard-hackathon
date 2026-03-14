@@ -3,13 +3,14 @@ from __future__ import annotations
 import hmac
 import json
 from collections import deque
+from datetime import datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from config import load_settings
 from db.store import DuckDBStore
@@ -27,8 +28,16 @@ from services.drift import run_drift_check
 
 class SyncRequest(BaseModel):
     full: bool = True
-    start_time: str | None = None
-    end_time: str | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "SyncRequest":
+        if self.full and (self.start_time is not None or self.end_time is not None):
+            raise ValueError("start_time and end_time must be omitted when full=true")
+        if self.start_time is not None and self.end_time is not None and self.start_time > self.end_time:
+            raise ValueError("start_time must be less than or equal to end_time")
+        return self
 
 
 class DecisionRequest(BaseModel):
@@ -95,6 +104,21 @@ def _records_to_dicts(frame: pd.DataFrame) -> list[dict[str, Any]]:
                 normalized[key] = value
         records.append(normalized)
     return records
+
+
+def _load_validation_metrics(store: DuckDBStore) -> dict[str, Any]:
+    settings = load_settings()
+    reports = store.read_table("ops.validation_reports")
+    if not reports.empty:
+        latest = reports.sort_values("created_at", ascending=False).iloc[0]
+        payload = latest["metrics_json"]
+        return json.loads(payload) if isinstance(payload, str) else payload
+
+    fallback_path = settings.artifact_dir / "validation_report.json"
+    if fallback_path.exists():
+        return json.loads(fallback_path.read_text(encoding="utf-8"))
+
+    raise HTTPException(status_code=404, detail="validation report not found")
 
 
 def _load_neighborhood_edges(store: DuckDBStore, user_id: str, max_hops: int) -> pd.DataFrame:
@@ -170,23 +194,36 @@ def _build_graph_payload(store: DuckDBStore, user_id: str, max_hops: int, max_no
         graph_edges["src_node"].isin(included_nodes)
         & graph_edges["dst_node"].isin(included_nodes)
     ].copy()
-
-    predictions = store.fetch_df(
-        """
-        SELECT user_id, risk_level
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY snapshot_date DESC, prediction_time DESC) AS rn
-            FROM ops.model_predictions
-        )
-        WHERE rn = 1
-        """
+    neighborhood_user_ids = sorted(
+        node_id.split(":", 1)[1]
+        for node_id in included_nodes
+        if node_id.startswith("user:")
     )
-    prediction_map = {
-        row["user_id"]: row["risk_level"]
-        for _, row in predictions.iterrows()
-    }
-    blacklist = store.fetch_df("SELECT user_id FROM canonical.blacklist_feed WHERE is_active = TRUE")
-    blacklist_users = set(blacklist["user_id"].tolist())
+    prediction_map: dict[str, str] = {}
+    blacklist_users: set[str] = set()
+    if neighborhood_user_ids:
+        placeholders = ", ".join(["?"] * len(neighborhood_user_ids))
+        predictions = store.fetch_df(
+            f"""
+            SELECT user_id, risk_level
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY snapshot_date DESC, prediction_time DESC) AS rn
+                FROM ops.model_predictions
+                WHERE user_id IN ({placeholders})
+            )
+            WHERE rn = 1
+            """,
+            tuple(neighborhood_user_ids),
+        )
+        prediction_map = {
+            row["user_id"]: row["risk_level"]
+            for _, row in predictions.iterrows()
+        }
+        blacklist = store.fetch_df(
+            f"SELECT user_id FROM canonical.blacklist_feed WHERE is_active = TRUE AND user_id IN ({placeholders})",
+            tuple(neighborhood_user_ids),
+        )
+        blacklist_users = set(blacklist["user_id"].tolist())
 
     node_records = []
     for node_id, hop in distances.items():
@@ -264,8 +301,8 @@ def healthz() -> dict[str, str]:
 def pipeline_sync(payload: SyncRequest) -> dict[str, Any]:
     sync_run_id = run_sync(
         full=payload.full,
-        start_time=None if payload.start_time is None else __import__("datetime").datetime.fromisoformat(payload.start_time),
-        end_time=None if payload.end_time is None else __import__("datetime").datetime.fromisoformat(payload.end_time),
+        start_time=payload.start_time,
+        end_time=payload.end_time,
     )
     return {"sync_run_id": sync_run_id}
 
@@ -316,9 +353,9 @@ def list_alerts(
     alerts = store.read_table("ops.alerts")
     if alerts.empty:
         return {"items": [], "page": page, "page_size": page_size, "total": 0, "has_next": False}
-    predictions = store.fetch_df("SELECT user_id, snapshot_date, risk_score FROM ops.model_predictions")
+    predictions = store.fetch_df("SELECT prediction_id, risk_score FROM ops.model_predictions")
     if not predictions.empty:
-        alerts = alerts.merge(predictions, on=["user_id", "snapshot_date"], how="left")
+        alerts = alerts.merge(predictions, on="prediction_id", how="left")
     alerts["created_at"] = alerts["created_at"].astype(str)
     if risk_level is not None:
         alerts = alerts[alerts["risk_level"] == risk_level]
@@ -331,6 +368,24 @@ def list_alerts(
     return {"items": items, "page": page, "page_size": page_size, "total": total, "has_next": start + page_size < total}
 
 
+@app.get("/alerts/{alert_id}", dependencies=[Depends(_require_api_key)])
+def get_alert(alert_id: str) -> dict[str, Any]:
+    settings = load_settings()
+    store = DuckDBStore(settings.db_path)
+    alert = store.fetch_df("SELECT * FROM ops.alerts WHERE alert_id = ? LIMIT 1", (alert_id,))
+    if alert.empty:
+        raise HTTPException(status_code=404, detail="alert not found")
+
+    prediction = store.fetch_df(
+        "SELECT risk_score FROM ops.model_predictions WHERE prediction_id = ? LIMIT 1",
+        (alert.iloc[0]["prediction_id"],),
+    )
+    alert_row = alert.copy()
+    alert_row["risk_score"] = None if prediction.empty else prediction.iloc[0]["risk_score"]
+    alert_row["created_at"] = alert_row["created_at"].astype(str)
+    return alert_row.iloc[0].to_dict()
+
+
 @app.get("/alerts/{alert_id}/report", dependencies=[Depends(_require_api_key)])
 def alert_report(alert_id: str) -> dict[str, Any]:
     settings = load_settings()
@@ -338,8 +393,16 @@ def alert_report(alert_id: str) -> dict[str, Any]:
     alert = store.fetch_df("SELECT * FROM ops.alerts WHERE alert_id = ?", (alert_id,))
     if alert.empty:
         raise HTTPException(status_code=404, detail="alert not found")
-    user_id = alert.iloc[0]["user_id"]
-    report = build_risk_diagnosis(user_id)
+    alert_row = alert.iloc[0]
+    user_id = alert_row["user_id"]
+    try:
+        report = build_risk_diagnosis(
+            user_id,
+            prediction_id=alert_row.get("prediction_id"),
+            snapshot_date=alert_row.get("snapshot_date"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     case = store.fetch_df("SELECT * FROM ops.cases WHERE alert_id = ? ORDER BY created_at DESC LIMIT 1", (alert_id,))
     case_actions = pd.DataFrame()
     if not case.empty:
@@ -368,7 +431,7 @@ def user_360(user_id: str) -> dict[str, Any]:
     if user.empty:
         raise HTTPException(status_code=404, detail="user not found")
     prediction = store.fetch_df(
-        "SELECT * FROM ops.model_predictions WHERE user_id = ? ORDER BY snapshot_date DESC LIMIT 1",
+        "SELECT * FROM ops.model_predictions WHERE user_id = ? ORDER BY snapshot_date DESC, prediction_time DESC LIMIT 1",
         (user_id,),
     )
     features = store.fetch_df(
@@ -420,16 +483,13 @@ def alert_decision(alert_id: str, payload: DecisionRequest) -> dict[str, str]:
 def model_metrics() -> dict[str, Any]:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
-    reports = store.read_table("ops.validation_reports")
-    if reports.empty:
-        raise HTTPException(status_code=404, detail="validation report not found")
-    latest = reports.sort_values("created_at", ascending=False).iloc[0]
-    return json.loads(latest["metrics_json"])
+    return _load_validation_metrics(store)
 
 
 @app.get("/metrics/threshold", dependencies=[Depends(_require_api_key)])
 def threshold_metrics() -> list[dict[str, Any]]:
-    report = model_metrics()
+    store = DuckDBStore(load_settings().db_path)
+    report = _load_validation_metrics(store)
     return report["threshold_sensitivity"]
 
 

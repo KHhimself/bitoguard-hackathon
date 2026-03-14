@@ -9,7 +9,7 @@ Most operations are available as single-command Makefile targets from the projec
 ```bash
 make help          # Show all targets
 make setup         # Install Python dependencies
-make test          # Run 61-test suite
+make test          # Run the backend test suite
 make sync          # Full data sync from live API
 make features      # Rebuild feature snapshots
 make train         # Train LightGBM + IsolationForest
@@ -44,8 +44,6 @@ bitoguard-hackathon/
 │   ├── services/            # Alert engine, explain, diagnosis
 │   └── tests/               # pytest suite
 ├── bitoguard_frontend/      # Next.js 16 App Router UI
-├── bitoguard_mock_api/      # Optional offline CSV-backed source adapter
-├── bitoguard_sim_output/    # Optional simulation CSV fixtures
 └── compose.yaml             # Docker Compose stack
 ```
 
@@ -53,10 +51,8 @@ bitoguard-hackathon/
 
 ```bash
 # Start backend + frontend (uses live BitoPro API as source)
+cp deploy/.env.compose.example .env
 docker compose up --build
-
-# With mock API for offline demo
-docker compose --profile sync up --build
 ```
 
 - Frontend: http://localhost:3000
@@ -83,6 +79,7 @@ PYTHONPATH=. uvicorn api.main:app --reload --port 8001
 cd bitoguard_frontend
 npm install
 cp .env.example .env.local  # Set BITOGUARD_INTERNAL_API_BASE=http://127.0.0.1:8001
+export BITOGUARD_INTERNAL_API_KEY=bitoguard-dev-key
 npm run dev  # Runs on :3000
 ```
 
@@ -167,7 +164,7 @@ Expected runtime: ~10-30 seconds (incremental, not full rebuild).
 ## Running Tests
 
 ```bash
-# Full test suite (61 tests: unit + integration + smoke + drift + rule engine)
+# Full backend test suite
 cd bitoguard_core && . .venv/bin/activate
 PYTHONPATH=. pytest tests/ -v
 
@@ -178,11 +175,14 @@ PYTHONPATH=. pytest tests/ -q
 make test
 ```
 
-Expected: **61 tests pass** across 4 test files:
-- `test_rule_engine.py`: 33 tests — all 11 rules, trigger + no-trigger cases
-- `test_model_pipeline.py`: 15 tests — temporal splits, refresh, drift detection
-- `test_source_integration.py`: 6 tests — canonicalization, sync lifecycle
-- `test_smoke.py`: 5 tests — API smoke, alert/case lifecycle
+Recommended frontend validation:
+
+```bash
+cd bitoguard_frontend
+npm install
+npm run lint
+npm run build
+```
 
 ## Module Ablation Study
 
@@ -285,16 +285,12 @@ Output: JSON report comparing the two most recent feature snapshots. Flags featu
 
 ## Offline / Demo Mode
 
-Use the mock API as a local source:
+Use the checked-in fixtures and tests for offline validation:
 
 ```bash
-# Terminal 1: start mock API
-cd bitoguard_mock_api && . .venv/bin/activate
-uvicorn app.main:app --reload --port 8000
-
-# Terminal 2: sync from mock source
 cd bitoguard_core && . .venv/bin/activate
-BITOGUARD_SOURCE_URL=http://localhost:8000 PYTHONPATH=. python pipeline/sync.py --full
+PYTHONPATH=. pytest tests/test_source_integration.py -v
+PYTHONPATH=. pytest tests/test_smoke.py -v
 ```
 
 ## Troubleshooting

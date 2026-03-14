@@ -13,16 +13,17 @@ function ReportPageContent() {
   const [manualSelectedAlert, setManualSelectedAlert] = useState<string>("")
 
   const { data: alertsData, isLoading: isAlertsLoading, error: alertsError } = useQuery({
-    queryKey: ["alerts"],
-    queryFn: () => api.getAlerts({ page_size: 200 }),
+    queryKey: ["alerts", "all"],
+    queryFn: () => api.getAllAlerts({ page_size: 200 }),
     select: (d) => d.items,
+    staleTime: 60_000,
   })
 
   const alertIds = alertsData?.map((a) => a.alert_id) ?? []
   const requestedAlertId = searchParams.get("alertId") ?? ""
   const selectedAlert =
-    (manualSelectedAlert && alertIds.includes(manualSelectedAlert) && manualSelectedAlert)
-    || (requestedAlertId && alertIds.includes(requestedAlertId) && requestedAlertId)
+    manualSelectedAlert
+    || requestedAlertId
     || alertIds[0]
     || ""
 
@@ -30,7 +31,10 @@ function ReportPageContent() {
     queryKey: ["report", selectedAlert],
     queryFn: () => api.getAlertReport(selectedAlert),
     enabled: !!selectedAlert,
+    staleTime: 60_000,
   })
+
+  const selectOptions = alertsData ?? []
 
   const maxAbsImpact = Math.max(...(report?.shap_top_factors.map((factor) => Math.abs(factor.impact)) ?? [0]))
 
@@ -54,10 +58,10 @@ function ReportPageContent() {
             router.replace(`/alerts/report?alertId=${alertId}`, { scroll: false })
           }}
           className="border border-[#e5e7eb] rounded-lg px-3 py-2 text-[13px] text-[#1a1d2e] bg-white focus:outline-none min-w-[220px]"
-          disabled={isAlertsLoading || alertIds.length === 0}
+          disabled={isAlertsLoading || selectOptions.length === 0}
         >
-          {alertIds.length === 0 && <option value="">沒有可用警示</option>}
-          {(alertsData ?? []).map((alert) => (
+          {selectOptions.length === 0 && <option value="">沒有可用警示</option>}
+          {selectOptions.map((alert) => (
             <option key={alert.alert_id} value={alert.alert_id}>
               {[
                 alert.user_id,
@@ -70,7 +74,7 @@ function ReportPageContent() {
         </select>
       </div>
       {isLoading && <div className="text-[#9ca3af] text-center py-8">載入中...</div>}
-      {!isAlertsLoading && !alertsError && alertIds.length === 0 && (
+      {!isAlertsLoading && !alertsError && selectOptions.length === 0 && (
         <div className="text-[#9ca3af] text-center py-8">目前沒有可查看的警示</div>
       )}
       {report && (
