@@ -85,17 +85,15 @@ def build_v2_features(
     user_ids = users["user_id"].dropna().unique().tolist()
     base = pd.DataFrame({"user_id": user_ids})
 
-    # Each entry: (module_result_df, probe_factory_or_None)
-    # The probe factory is called only when the result is empty/column-less.
-    module_entries: list[tuple[pd.DataFrame | None, object]] = [
-        (compute_profile_features(users, snapshot_date=snapshot_date),  None),
-        (compute_twd_features(fiat, snapshot_date=snapshot_date),       _make_probe_fiat),
-        (compute_crypto_features(crypto),                  _make_probe_crypto),
-        (compute_swap_features(trades),                    _make_probe_trades),
-        (compute_trading_features(trades),                 _make_probe_trades),
-        (compute_ip_features(logins),                      _make_probe_logins),
-        (compute_sequence_features(fiat, trades, crypto),  None),
-        (compute_bipartite_features(edges, user_ids),      None),
+    module_entries: list[pd.DataFrame | None] = [
+        compute_profile_features(users, snapshot_date=snapshot_date),
+        compute_twd_features(fiat, snapshot_date=snapshot_date),
+        compute_crypto_features(crypto),
+        compute_swap_features(trades),
+        compute_trading_features(trades),
+        compute_ip_features(logins),
+        compute_sequence_features(fiat, trades, crypto),
+        compute_bipartite_features(edges, user_ids),
     ]
     # Paired probe functions for modules that need special probing
     probe_fns = [
@@ -109,7 +107,7 @@ def build_v2_features(
         None,
     ]
 
-    for (module_df, _), probe_fn in zip(module_entries, probe_fns):
+    for module_df, probe_fn in zip(module_entries, probe_fns):
         if module_df is None:
             continue
         cols = getattr(module_df, "columns", [])
@@ -152,13 +150,13 @@ def build_and_store_v2_features(
     from db.store import DuckDBStore, make_id
     from config import load_settings
 
+    if snapshot_date is None:
+        snapshot_date = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+
     master = build_v2_features(users, fiat, crypto, trades, logins, edges,
                                snapshot_date=snapshot_date)
     if master.empty:
         return master
-
-    if snapshot_date is None:
-        snapshot_date = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
 
     master.insert(0, "feature_snapshot_id",
                   [make_id(f"v2_{uid[-4:]}") for uid in master["user_id"]])
