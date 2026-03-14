@@ -25,10 +25,6 @@ DECISION_STATUS_MAP = {
 }
 
 
-def _alert_key(user_id: str, snapshot_date: object) -> tuple[str, object]:
-    return (user_id, pd.Timestamp(snapshot_date).date())
-
-
 def _sync_existing_alerts(store: DuckDBStore, predictions: pd.DataFrame) -> None:
     if predictions.empty:
         return
@@ -95,10 +91,17 @@ def generate_alerts() -> pd.DataFrame:
             "status": "open", "latest_decision": None,
         })
     if alerts:
-        store.append_dataframe("ops.alerts", pd.DataFrame(alerts))
-    if cases:
-        store.append_dataframe("ops.cases", pd.DataFrame(cases))
-    return pd.DataFrame(alerts)
+        alerts_df = pd.DataFrame(alerts)
+        cases_df = pd.DataFrame(cases)
+        with store.transaction() as conn:
+            conn.register("alerts_df", alerts_df)
+            conn.execute("INSERT INTO ops.alerts SELECT * FROM alerts_df")
+            conn.unregister("alerts_df")
+            conn.register("cases_df", cases_df)
+            conn.execute("INSERT INTO ops.cases SELECT * FROM cases_df")
+            conn.unregister("cases_df")
+        return alerts_df
+    return pd.DataFrame()
 
 
 def apply_case_decision(alert_id: str, decision: str, actor: str = "analyst", note: str = "") -> dict[str, str]:
