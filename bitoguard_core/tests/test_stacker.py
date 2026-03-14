@@ -43,3 +43,16 @@ def test_catboost_trains_and_saves(tmp_path, monkeypatch):
     assert "model_version" in result
     assert Path(result["model_path"]).exists()
     assert result["model_version"].startswith("catboost_")
+
+
+from models.stacker import train_stacker
+
+
+def test_stacker_trains_and_saves(tmp_path, monkeypatch):
+    store = _configure(tmp_path, monkeypatch)
+    _seed_v2(store)
+    result = train_stacker(n_folds=2)
+    assert "stacker_version" in result
+    assert Path(result["stacker_path"]).exists()
+    assert "branch_models" in result
+    assert len(result["branch_models"]) >= 2
