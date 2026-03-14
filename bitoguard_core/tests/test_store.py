@@ -64,3 +64,28 @@ def test_transaction_is_atomic_on_error(tmp_path: Path) -> None:
         pass
     result = store.fetch_df("SELECT COUNT(*) AS n FROM ops.alerts WHERE alert_id = 'atomic_test'")
     assert result.iloc[0]["n"] == 0, "Transaction must have been rolled back"
+
+
+# ── Column name validation (refresh_live._safe_column_name) ──────────────────
+
+from pipeline.refresh_live import _safe_column_name
+
+
+@pytest.mark.parametrize("bad_col", [
+    "x; DROP TABLE foo; --",
+    "a b",
+    "1abc",
+    "-col",
+])
+def test_safe_column_name_rejects_invalid(bad_col):
+    with pytest.raises(ValueError, match="invalid characters"):
+        _safe_column_name(bad_col)
+
+
+@pytest.mark.parametrize("good_col", [
+    "user_id",
+    "fiat_in_30d",
+    "_private",
+])
+def test_safe_column_name_accepts_valid(good_col):
+    assert _safe_column_name(good_col) == good_col
