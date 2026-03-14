@@ -4,8 +4,9 @@ import json
 from collections import deque
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 import pandas as pd
 from pydantic import BaseModel
 
@@ -51,6 +52,16 @@ ALLOWED_DECISIONS = [
     "escalate",
     "request_monitoring",
 ]
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def _require_api_key(api_key: str | None = Security(_api_key_header)) -> None:
+    settings = load_settings()
+    if settings.api_key is None:
+        return  # Auth disabled in dev mode
+    if api_key != settings.api_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing X-API-Key header")
 
 
 def _row_to_dict(frame: pd.DataFrame) -> dict[str, Any] | None:
@@ -226,7 +237,7 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/pipeline/sync")
+@app.post("/pipeline/sync", dependencies=[Depends(_require_api_key)])
 def pipeline_sync(payload: SyncRequest) -> dict[str, Any]:
     sync_run_id = run_sync(
         full=payload.full,
@@ -236,7 +247,7 @@ def pipeline_sync(payload: SyncRequest) -> dict[str, Any]:
     return {"sync_run_id": sync_run_id}
 
 
-@app.post("/features/rebuild")
+@app.post("/features/rebuild", dependencies=[Depends(_require_api_key)])
 def rebuild_features() -> dict[str, int]:
     graph_df = build_graph_features()
     day_df, rolling_df = build_feature_snapshots()
@@ -247,7 +258,7 @@ def rebuild_features() -> dict[str, int]:
     }
 
 
-@app.post("/model/train")
+@app.post("/model/train", dependencies=[Depends(_require_api_key)])
 def model_train() -> dict[str, Any]:
     model_info = train_model()
     anomaly_info = train_anomaly_model()
@@ -264,13 +275,13 @@ def model_train() -> dict[str, Any]:
     }
 
 
-@app.post("/model/score")
+@app.post("/model/score", dependencies=[Depends(_require_api_key)])
 def model_score() -> dict[str, Any]:
     predictions = score_latest_snapshot()
     return {"rows": len(predictions), "high_risk": int((predictions["risk_level"].isin(["high", "critical"])).sum())}
 
 
-@app.get("/alerts")
+@app.get("/alerts", dependencies=[Depends(_require_api_key)])
 def list_alerts(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
@@ -297,7 +308,7 @@ def list_alerts(
     return {"items": items, "page": page, "page_size": page_size, "total": total, "has_next": start + page_size < total}
 
 
-@app.get("/alerts/{alert_id}/report")
+@app.get("/alerts/{alert_id}/report", dependencies=[Depends(_require_api_key)])
 def alert_report(alert_id: str) -> dict[str, Any]:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
@@ -326,7 +337,7 @@ def alert_report(alert_id: str) -> dict[str, Any]:
     return report
 
 
-@app.get("/users/{user_id}/360")
+@app.get("/users/{user_id}/360", dependencies=[Depends(_require_api_key)])
 def user_360(user_id: str) -> dict[str, Any]:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
@@ -363,7 +374,7 @@ def user_360(user_id: str) -> dict[str, Any]:
     }
 
 
-@app.get("/users/{user_id}/graph")
+@app.get("/users/{user_id}/graph", dependencies=[Depends(_require_api_key)])
 def user_graph(user_id: str, max_hops: int = Query(default=2, ge=1, le=2)) -> dict[str, Any]:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
@@ -374,7 +385,7 @@ def user_graph(user_id: str, max_hops: int = Query(default=2, ge=1, le=2)) -> di
     )
 
 
-@app.post("/alerts/{alert_id}/decision")
+@app.post("/alerts/{alert_id}/decision", dependencies=[Depends(_require_api_key)])
 def alert_decision(alert_id: str, payload: DecisionRequest) -> dict[str, str]:
     try:
         return apply_case_decision(alert_id, payload.decision, actor=payload.actor, note=payload.note)
@@ -382,7 +393,7 @@ def alert_decision(alert_id: str, payload: DecisionRequest) -> dict[str, str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/metrics/model")
+@app.get("/metrics/model", dependencies=[Depends(_require_api_key)])
 def model_metrics() -> dict[str, Any]:
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
@@ -393,12 +404,12 @@ def model_metrics() -> dict[str, Any]:
     return json.loads(latest["metrics_json"])
 
 
-@app.get("/metrics/threshold")
+@app.get("/metrics/threshold", dependencies=[Depends(_require_api_key)])
 def threshold_metrics() -> list[dict[str, Any]]:
     report = model_metrics()
     return report["threshold_sensitivity"]
 
 
-@app.get("/metrics/drift")
+@app.get("/metrics/drift", dependencies=[Depends(_require_api_key)])
 def drift_metrics() -> dict[str, Any]:
     return run_drift_check().to_dict()

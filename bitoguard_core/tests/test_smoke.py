@@ -186,3 +186,29 @@ def test_metrics_drift_endpoint_returns_health_status(tmp_path: Path, monkeypatc
     assert isinstance(body["health_ok"], bool)
     assert isinstance(body["drifted_features"], list)
     assert isinstance(body["total_checked"], int)
+
+
+def test_api_key_enforcement_when_configured(tmp_path: Path, monkeypatch) -> None:
+    """When BITOGUARD_API_KEY is set, requests without the key get 403."""
+    _configure_temp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("BITOGUARD_API_KEY", "test-secret-key-abc123")
+    import importlib
+    import api.main as main_module
+    importlib.reload(main_module)
+    client = TestClient(main_module.app)
+
+    # Without key: 403
+    resp = client.get("/alerts")
+    assert resp.status_code == 403
+
+    # With wrong key: 403
+    resp = client.get("/alerts", headers={"X-API-Key": "wrong-key"})
+    assert resp.status_code == 403
+
+    # With correct key: 200
+    resp = client.get("/alerts", headers={"X-API-Key": "test-secret-key-abc123"})
+    assert resp.status_code == 200
+
+    # /healthz never requires key
+    resp = client.get("/healthz")
+    assert resp.status_code == 200

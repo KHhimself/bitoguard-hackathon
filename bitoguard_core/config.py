@@ -27,6 +27,9 @@ class Settings:
     # blacklist_2hop_count) are disabled until the graph recovery plan is executed.
     # See docs/GRAPH_TRUST_BOUNDARY.md and docs/GRAPH_RECOVERY_PLAN.md.
     graph_trusted_only: bool
+    # Optional API key for X-API-Key header authentication.
+    # When None (BITOGUARD_API_KEY unset), auth is disabled (dev mode).
+    api_key: str | None
 
 
 # Graph features disabled by default due to placeholder-device artifact (A7).
@@ -77,4 +80,5 @@ def load_settings() -> Settings:
         graph_max_nodes=int(os.getenv("BITOGUARD_GRAPH_MAX_NODES", "120")),
         graph_max_edges=int(os.getenv("BITOGUARD_GRAPH_MAX_EDGES", "240")),
         graph_trusted_only=graph_trusted_raw not in ("false", "0", "no"),
+        api_key=os.getenv("BITOGUARD_API_KEY") or None,
     )

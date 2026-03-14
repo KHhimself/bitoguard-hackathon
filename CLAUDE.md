@@ -136,6 +136,7 @@ Graph features are **split**: most are disabled by default due to known data qua
 | `BITOGUARD_LABEL_SOURCE` | `hidden_suspicious_label` | Oracle label column |
 | `BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY` | `true` | Disable unsafe graph features |
 | `BITOGUARD_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated CORS origins |
+| `BITOGUARD_API_KEY` | (unset) | API key for X-API-Key header auth; unset = auth disabled |
 
 ### Artifacts
 
