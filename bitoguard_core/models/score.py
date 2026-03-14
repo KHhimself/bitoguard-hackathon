@@ -44,18 +44,6 @@ def _prediction_key(user_id: str, snapshot_date: object) -> tuple[str, object]:
     return (user_id, pd.Timestamp(snapshot_date).date())
 
 
-def _component_weights(settings) -> dict[str, float]:
-    weights = {
-        "m1": 0.20 if settings.m1_enabled else 0.0,
-        "m3": 0.45 if settings.m3_enabled else 0.0,
-        "m4": 0.35 if settings.m4_enabled else 0.0,
-        "m5": 0.10 if settings.m5_enabled else 0.0,
-    }
-    total = sum(weights.values())
-    if total == 0:
-        return weights
-    return {name: value / total for name, value in weights.items()}
-
 
 def _build_model_version(
     *,
