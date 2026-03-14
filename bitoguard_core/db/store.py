@@ -11,6 +11,25 @@ import pandas as pd
 
 from db.schema import CANONICAL_TABLE_SPECS, FEATURE_TABLE_SPECS, OPS_TABLE_DDLS, RAW_TABLE_SPECS, TableSpec
 
+import threading
+
+_ALLOWED_TABLES: frozenset[str] = frozenset(
+    f"{spec.schema}.{spec.name}"
+    for specs in (RAW_TABLE_SPECS, CANONICAL_TABLE_SPECS, FEATURE_TABLE_SPECS)
+    for spec in specs
+) | frozenset({
+    "ops.sync_runs", "ops.data_quality_issues", "ops.oracle_user_labels",
+    "ops.oracle_scenarios", "ops.model_predictions", "ops.alerts",
+    "ops.cases", "ops.case_actions", "ops.validation_reports", "ops.refresh_state",
+})
+
+_WRITE_LOCK = threading.Lock()
+
+
+def _validate_table_name(table_name: str) -> None:
+    if table_name not in _ALLOWED_TABLES:
+        raise ValueError(f"Table '{table_name}' is not in the allowed table list")
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -56,12 +75,14 @@ class DuckDBStore:
         conn.execute(f"CREATE TABLE IF NOT EXISTS {spec.schema}.{spec.name} ({col_defs})")
 
     def replace_table(self, table_name: str, dataframe: pd.DataFrame) -> None:
+        _validate_table_name(table_name)
         with self.connect() as conn:
             conn.register("tmp_df", dataframe)
             conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM tmp_df")
             conn.unregister("tmp_df")
 
     def append_dataframe(self, table_name: str, dataframe: pd.DataFrame) -> None:
+        _validate_table_name(table_name)
         if dataframe.empty:
             return
         with self.connect() as conn:
@@ -70,6 +91,7 @@ class DuckDBStore:
             conn.unregister("tmp_df")
 
     def read_table(self, table_name: str) -> pd.DataFrame:
+        _validate_table_name(table_name)
         with self.connect() as conn:
             return conn.execute(f"SELECT * FROM {table_name}").df()
 
