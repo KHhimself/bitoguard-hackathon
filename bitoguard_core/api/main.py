@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 from collections import deque
 from typing import Any
@@ -60,8 +61,8 @@ async def _require_api_key(api_key: str | None = Security(_api_key_header)) -> N
     settings = load_settings()
     if settings.api_key is None:
         return  # Auth disabled in dev mode
-    if api_key != settings.api_key:
-        raise HTTPException(status_code=403, detail="Invalid or missing X-API-Key header")
+    if api_key is None or not hmac.compare_digest(api_key, settings.api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
 
 
 def _row_to_dict(frame: pd.DataFrame) -> dict[str, Any] | None:
