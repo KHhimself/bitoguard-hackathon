@@ -84,16 +84,31 @@ PYTHONPATH=. pytest tests/test_train_entrypoint.py::test_train_entrypoint_import
 ```
 Expected: FAIL — `ImportError: cannot import name 'train_catboost'`
 
-- [ ] **Step 1.3: Fix the import**
+- [ ] **Step 1.3: Fix the import and parse_args signature**
 
-In `bitoguard_core/ml_pipeline/train_entrypoint.py` line 20, change:
+Two changes in `bitoguard_core/ml_pipeline/train_entrypoint.py`:
+
+**a) Line 20 — fix the import alias:**
 ```python
 # Before
 from models.train_catboost import train_catboost
 # After
 from models.train_catboost import train_catboost_model as train_catboost
 ```
-The existing call at line ~190 (`result = train_catboost()`) is already correct via the alias — no other changes needed.
+The existing call at line ~190 (`result = train_catboost()`) works correctly via the alias.
+
+**b) Line 91 — make parse_args() accept an optional args list** (required for tests):
+```python
+# Before
+def parse_args():
+    ...
+    return parser.parse_args()
+
+# After
+def parse_args(args=None):
+    ...
+    return parser.parse_args(args)
+```
 
 - [ ] **Step 1.4: Run tests to verify they pass**
 
@@ -458,11 +473,16 @@ import time
 Find a logical location (e.g., after the existing `/pipeline/sync` endpoint) and add:
 
 ```python
+from pydantic import BaseModel
+
+class PipelineRunRequest(BaseModel):
+    enable_tuning: bool = False
+
 @app.post("/pipeline/run")
-async def run_pipeline(enable_tuning: bool = False):
+async def run_pipeline(request: PipelineRunRequest = PipelineRunRequest()):
     """Trigger the Step Functions ML pipeline.
 
-    Args:
+    Body:
         enable_tuning: If True, runs full hyperparameter tuning (2-3h).
                        If False, uses best params from SSM (15-25 min).
 
@@ -481,10 +501,12 @@ async def run_pipeline(enable_tuning: bool = False):
     resp = sfn.start_execution(
         stateMachineArn=arn,
         name=execution_name,
-        input=json.dumps({"enable_tuning": enable_tuning}),
+        input=json.dumps({"enable_tuning": request.enable_tuning}),
     )
     return {"execution_arn": resp["executionArn"]}
 ```
+
+Also update Step 4.1 test to use `json={"enable_tuning": True}` which already matches body semantics — no test change needed since the tests already use `json=` which is correct for body parameters.
 
 - [ ] **Step 4.4: Run all pipeline API tests**
 
@@ -607,7 +629,7 @@ In `step_functions.tf`, find the `HyperparameterTuning` state (around line 492).
 
 - [ ] **Step 6.2: Add AnalyzeTuning state**
 
-After the closing brace of `HyperparameterTuning` and before `TrainStacker`, insert the `AnalyzeTuning` state:
+After the closing brace of `HyperparameterTuning` (around line 500) and before the `ParallelTraining` state (around line 502) — note that `ParallelTraining` exists between `HyperparameterTuning` and `TrainStacker` in the file — insert the `AnalyzeTuning` state:
 ```json
 "AnalyzeTuning": {
   "Type": "Task",
@@ -660,28 +682,27 @@ After `TrainStacker` and before `ScoringStage`, insert:
 
 **Sub-fix F8: Fix States.Format for dynamic SageMaker job names**
 
-- [ ] **Step 6.5: Fix all bare string interpolations**
+- [ ] **Step 6.5: Fix all dynamic job name interpolations with States.Format**
 
-Find every occurrence of a job name pattern like `"bitoguard-<type>-$.Execution.Name"` (a string containing a literal `$.Execution.Name`). These are in the `ProcessingJobName`, `HyperParameterTuningJobName`, and `TrainingJobName` fields.
+The following 8 locations in `step_functions.tf` use broken string interpolation for SageMaker job names. Apply `States.Format` to each. Note: fields that use `.$` suffix enable JSONPath/intrinsic evaluation — add the `.$` suffix when changing from a plain string key.
 
-Replace each with the `States.Format` intrinsic pattern. Examples:
+**Ref:** https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-intrinsic-functions.html
 
-```json
-// Before (broken — literal string)
-"ProcessingJobName": "bitoguard-preprocessing-$.Execution.Name"
+| Approx Line | Field | Before | After |
+|-------------|-------|--------|-------|
+| ~141 | `ProcessingJobName` | `"bitoguard-preprocessing-$.Execution.Name"` | `"ProcessingJobName.$": "States.Format('bitoguard-preprocessing-{}', $$.Execution.Name)"` |
+| ~191 | `SNAPSHOT_ID` (env var) | `"$.Execution.Name"` | `"SNAPSHOT_ID.$": "States.Format('{}', $$.Execution.Name)"` |
+| ~247 | `HyperParameterTuningJobName` (lgbm) | `"bitoguard-lgbm-tuning-$.Execution.Name"` | `"HyperParameterTuningJobName.$": "States.Format('bitoguard-lgbm-tuning-{}', $$.Execution.Name)"` |
+| ~381 | `HyperParameterTuningJobName` (catboost) | `"bitoguard-catboost-tuning-$.Execution.Name"` | `"HyperParameterTuningJobName.$": "States.Format('bitoguard-catboost-tuning-{}', $$.Execution.Name)"` |
+| ~512 | `TrainingJobName` (lgbm) | `"bitoguard-lgbm-$$.Execution.Name"` | `"TrainingJobName.$": "States.Format('bitoguard-lgbm-{}', $$.Execution.Name)"` |
+| ~556 | `TrainingJobName` (catboost) | `"bitoguard-catboost-$$.Execution.Name"` | `"TrainingJobName.$": "States.Format('bitoguard-catboost-{}', $$.Execution.Name)"` |
+| ~602 | `TrainingJobName` (iforest) | `"bitoguard-iforest-$$.Execution.Name"` | `"TrainingJobName.$": "States.Format('bitoguard-iforest-{}', $$.Execution.Name)"` |
+| ~656 | `TrainingJobName` (stacker) | `"bitoguard-stacker-$.Execution.Name"` | `"TrainingJobName.$": "States.Format('bitoguard-stacker-{}', $$.Execution.Name)"` |
 
-// After (correct — intrinsic function)
-"ProcessingJobName.$": "States.Format('bitoguard-preprocessing-{}', $$.Execution.Name)"
-```
-
-```json
-// Before
-"HyperParameterTuningJobName": "bitoguard-lgbm-tuning-$.Execution.Name"
-// After
-"HyperParameterTuningJobName.$": "States.Format('bitoguard-lgbm-tuning-{}', $$.Execution.Name)"
-```
-
-Apply the same pattern to ALL job name fields. Note: keys that use `.$` suffix enable JSONPath/intrinsic evaluation. Ref: https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-intrinsic-functions.html
+Pattern to apply for each:
+1. Remove the old key (e.g., `"ProcessingJobName"`)
+2. Add the new key with `.$` suffix and `States.Format(...)` value
+3. Use `$$.Execution.Name` (double-dollar) as the JSONPath context reference — this is the correct way to reference the execution context in Step Functions ASL
 
 - [ ] **Step 6.6: Validate Terraform**
 
@@ -907,7 +928,7 @@ resource "aws_ecs_task_definition" "copy_seed" {
   volume {
     name = "efs-artifacts"
     efs_volume_configuration {
-      file_system_id          = aws_efs_file_system.main.id
+      file_system_id          = aws_efs_file_system.bitoguard.id
       access_point_id         = aws_efs_access_point.artifacts.id
       transit_encryption      = "ENABLED"
       authorization_config {
@@ -929,6 +950,37 @@ resource "aws_cloudwatch_log_group" "copy_seed" {
 output "copy_seed_task_definition_arn" {
   value = aws_ecs_task_definition.copy_seed.arn
 }
+```
+
+- [ ] **Step 8.1b: Add missing Terraform outputs to outputs.tf**
+
+The bootstrap script needs 4 outputs that don't exist yet. Append to `infra/aws/terraform/outputs.tf`:
+
+```hcl
+output "artifacts_bucket_name" {
+  description = "S3 artifacts bucket name"
+  value       = aws_s3_bucket.artifacts.bucket
+}
+
+output "aws_region" {
+  description = "AWS region"
+  value       = var.aws_region
+}
+
+output "private_subnet_ids" {
+  description = "Private subnet IDs for ECS tasks"
+  value       = aws_subnet.private[*].id
+}
+
+output "ecs_security_group_id" {
+  description = "ECS tasks security group ID"
+  value       = aws_security_group.ecs_tasks.id
+}
+```
+
+```bash
+git add infra/aws/terraform/outputs.tf
+git commit -m "fix: add missing Terraform outputs needed by bootstrap-efs.sh"
 ```
 
 - [ ] **Step 8.2: Create bootstrap-efs.sh**
