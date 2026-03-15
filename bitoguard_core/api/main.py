@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
+import time
 from collections import deque
 from datetime import datetime
 from typing import Any
@@ -44,6 +46,10 @@ class DecisionRequest(BaseModel):
     decision: str
     actor: str = "analyst"
     note: str = ""
+
+
+class PipelineRunRequest(BaseModel):
+    enable_tuning: bool = False
 
 
 _settings = load_settings()
@@ -308,6 +314,36 @@ def pipeline_sync(payload: SyncRequest) -> dict[str, Any]:
         end_time=payload.end_time,
     )
     return {"sync_run_id": sync_run_id}
+
+
+@app.post("/pipeline/run")
+async def run_pipeline(request: PipelineRunRequest = None) -> dict[str, Any]:
+    """Trigger the Step Functions ML pipeline.
+
+    Body:
+        enable_tuning: If True, runs full hyperparameter tuning (2-3h).
+                       If False, uses best params from SSM (15-25 min).
+
+    Ref: https://docs.aws.amazon.com/step-functions/latest/dg/tutorial-api-gateway.html
+    """
+    if request is None:
+        request = PipelineRunRequest()
+    arn = os.environ.get("BITOGUARD_STEP_FUNCTIONS_ARN")
+    if not arn:
+        raise HTTPException(
+            status_code=500,
+            detail="BITOGUARD_STEP_FUNCTIONS_ARN environment variable not set",
+        )
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    import boto3
+    sfn = boto3.client("stepfunctions", region_name=region)
+    execution_name = f"api-run-{int(time.time())}"
+    resp = sfn.start_execution(
+        stateMachineArn=arn,
+        name=execution_name,
+        input=json.dumps({"enable_tuning": request.enable_tuning}),
+    )
+    return {"execution_arn": resp["executionArn"]}
 
 
 @app.post("/features/rebuild", dependencies=[Depends(_require_api_key)])
