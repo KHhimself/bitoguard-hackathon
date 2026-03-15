@@ -31,13 +31,6 @@ resource "aws_amplify_app" "frontend" {
           - bitoguard_frontend/node_modules/**/*
   EOT
 
-  # Redirect all routes to Next.js for SPA/SSR handling
-  custom_rule {
-    source = "/<*>"
-    status = "404-200"
-    target = "/index.html"
-  }
-
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-frontend"
   })

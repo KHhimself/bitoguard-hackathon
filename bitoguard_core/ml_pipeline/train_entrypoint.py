@@ -334,6 +334,11 @@ def main():
     if args.use_s3_data:
         training_df = load_training_data_from_path(args.input_data)
         print(f"Loaded {len(training_df)} rows from S3 input: {args.input_data}")
+        # NOTE: training_df is loaded but the underlying train_model/train_catboost/train_anomaly
+        # functions currently read data from DuckDB internally. Passing a DataFrame to them
+        # is a follow-up task. This flag currently only validates the S3 data can be loaded.
+        print("WARNING: --use_s3_data loaded data but training functions still read from DuckDB. "
+              "Ensure DuckDB is accessible or update training functions to accept df parameter.")
 
     print(f"\nTraining Configuration:")
     print(f"  Model Type: {args.model_type}")

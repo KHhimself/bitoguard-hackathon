@@ -316,7 +316,7 @@ def pipeline_sync(payload: SyncRequest) -> dict[str, Any]:
     return {"sync_run_id": sync_run_id}
 
 
-@app.post("/pipeline/run")
+@app.post("/pipeline/run", dependencies=[Depends(_require_api_key)])
 async def run_pipeline(request: PipelineRunRequest = None) -> dict[str, Any]:
     """Trigger the Step Functions ML pipeline.
 
