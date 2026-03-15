@@ -742,7 +742,7 @@ resource "aws_sfn_state_machine" "ml_pipeline" {
           FunctionName = aws_lambda_function.model_registry.arn
           Payload = {
             "execution_id.$"     = "$$.Execution.Name"
-            "model_artifacts.$"  = "$.stacker_artifacts"
+            "model_artifacts.$"  = "$.stacker_training"
             model_type           = "stacker"
           }
         }
@@ -803,9 +803,9 @@ resource "aws_sfn_state_machine" "ml_pipeline" {
         Parameters = {
           FunctionName = aws_lambda_function.drift_detector.arn
           Payload = {
-            baseline_snapshot_id = "$.baseline_snapshot_id"
-            current_snapshot_id  = "$.current_snapshot_id"
-            bucket_name          = aws_s3_bucket.artifacts.id
+            "baseline_snapshot_id.$" = "$.baseline_snapshot_id"
+            "current_snapshot_id.$"  = "$.current_snapshot_id"
+            bucket_name              = aws_s3_bucket.artifacts.id
           }
         }
         ResultPath = "$.drift"
