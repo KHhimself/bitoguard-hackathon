@@ -285,7 +285,7 @@ resource "aws_ecs_task_definition" "copy_seed" {
     essential = true
     command = [
       "sh", "-c",
-      "if [ ! -f /mnt/efs/bitoguard.duckdb ]; then aws s3 cp s3://${aws_s3_bucket.artifacts.bucket}/seed/bitoguard.duckdb /mnt/efs/bitoguard.duckdb && echo 'Seed complete'; else echo 'EFS already seeded, skipping'; fi"
+      "if [ ! -f /mnt/efs/artifacts/bitoguard.duckdb ]; then mkdir -p /mnt/efs/artifacts && aws s3 cp s3://${aws_s3_bucket.artifacts.bucket}/seed/bitoguard.duckdb /mnt/efs/artifacts/bitoguard.duckdb && echo 'Seed complete'; else echo 'EFS already seeded, skipping'; fi"
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -297,7 +297,7 @@ resource "aws_ecs_task_definition" "copy_seed" {
     }
     mountPoints = [{
       sourceVolume  = "efs-storage"
-      containerPath = "/mnt/efs"
+      containerPath = "/mnt/efs/artifacts"
       readOnly      = false
     }]
   }])
