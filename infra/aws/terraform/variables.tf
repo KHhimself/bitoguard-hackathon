@@ -63,3 +63,47 @@ variable "domain_name" {
   type        = string
   default     = ""
 }
+
+# ML Pipeline Variables
+variable "ml_notification_email" {
+  description = "Email address for ML pipeline notifications"
+  type        = string
+  default     = ""
+}
+
+variable "bitopro_api_url" {
+  description = "BitoPro API endpoint URL"
+  type        = string
+  default     = "https://aws-event-api.bitopro.com"
+}
+
+variable "ml_daily_schedule" {
+  description = "Cron expression for daily full pipeline run"
+  type        = string
+  default     = "cron(0 2 * * ? *)" # 2 AM UTC daily
+}
+
+variable "ml_incremental_schedule" {
+  description = "Cron expression for incremental refresh"
+  type        = string
+  default     = "cron(0 8,12,16,20 * * ? *)" # Every 4 hours, 8 AM - 8 PM UTC
+}
+
+variable "project_name" {
+  description = "Project name for resource naming"
+  type        = string
+  default     = "bitoguard"
+}
+
+variable "github_repo_url" {
+  description = "GitHub repository URL for Amplify (e.g. https://github.com/org/repo)"
+  type        = string
+  default     = ""
+}
+
+variable "github_access_token" {
+  description = "GitHub personal access token for Amplify repo connection"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

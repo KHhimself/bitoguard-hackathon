@@ -9,3 +9,5 @@ backend_desired_count   = 2
 frontend_desired_count  = 2
 bitoguard_source_url    = "https://aws-event-api.bitopro.com"
 domain_name             = ""
+github_repo_url         = "https://github.com/YOUR_ORG/bitoguard-hackathon"
+github_access_token     = "ghp_YOUR_TOKEN_HERE"
