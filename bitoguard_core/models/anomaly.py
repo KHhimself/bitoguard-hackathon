@@ -112,12 +112,13 @@ def build_raw_iforest_features(
 
 
 def train_anomaly_model() -> dict:
-    """Train IsolationForest on raw user-level aggregates (negatives-only).
+    """Train IsolationForest on raw user-level aggregates (all users).
 
     Uses first-order aggregates from canonical tables instead of engineered
     features, so the anomaly signal is orthogonal to the supervised stacker.
-    Trains only on non-suspicious users so the model learns the 'normal'
-    distribution without positive contamination.
+    All users are included — IsolationForest finds statistical outliers on its
+    own without any label guidance. contamination=0.05 is a domain estimate
+    used only to set the predict() threshold, not to filter training data.
     """
     settings = load_settings()
     store = DuckDBStore(settings.db_path)
@@ -131,21 +132,12 @@ def train_anomaly_model() -> dict:
         raise ValueError("canonical.fiat_transactions is empty — run 'make sync' first.")
     snapshot_date = pd.Timestamp(raw_max).normalize()
 
-    # Build raw features for all users
+    # Build raw features for ALL users — no label filtering.
+    # IsolationForest is purely unsupervised: it isolates statistically rare
+    # points regardless of whether they are known positives.
     features_df = build_raw_iforest_features(store, snapshot_date)
-
-    # Filter to negatives-only: exclude users with hidden_suspicious_label = 1
-    try:
-        labels_df = store.fetch_df(
-            "SELECT user_id FROM ops.oracle_user_labels WHERE hidden_suspicious_label = 1"
-        )
-        positive_users = set(labels_df["user_id"].tolist())
-    except Exception:
-        positive_users = set()
-
-    features_df = features_df[~features_df["user_id"].isin(positive_users)].copy()
     if features_df.empty:
-        raise ValueError("No negative-label users found for IsolationForest training.")
+        raise ValueError("No users found for IsolationForest training.")
 
     X = features_df[_RAW_FEATURE_COLUMNS].fillna(0).values
     print(f"IsolationForest training: {len(X):,} users, {len(_RAW_FEATURE_COLUMNS)} raw features")
