@@ -92,15 +92,31 @@ export interface ShapFactor {
   impact: number
 }
 
+export interface TimelineEvent {
+  time: string
+  type: string
+  amount: number | null
+}
+
+export interface GraphEvidence {
+  shared_device_count: number
+  shared_bank_count: number
+  shared_wallet_count: number
+  blacklist_1hop_count: number
+  blacklist_2hop_count: number
+  component_size: number
+}
+
 export interface DiagnosisReport {
+  user_id: string
   summary_zh: string
   alert: Alert | null
   case: { case_id: string; status: string; latest_decision: string | null; created_at: string } | null
   risk_summary: { risk_level: RiskLevel; risk_score: number }
   shap_top_factors: ShapFactor[]
-  rule_hits: unknown[]
-  graph_evidence: unknown
-  timeline_summary: unknown[]
+  rule_hits: string[]
+  graph_evidence: GraphEvidence | null
+  timeline_summary: TimelineEvent[]
   recommended_action: string
   allowed_decisions: string[]
   case_actions: unknown[]

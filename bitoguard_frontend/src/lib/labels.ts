@@ -28,3 +28,24 @@ export const RECOMMENDED_ACTION_ZH: Record<string, string> = {
   manual_review: "人工複核",
   hold_withdrawal: "暫停出金",
 }
+
+export const DECISION_ZH: Record<string, string> = {
+  confirm_suspicious:      "確認可疑",
+  dismiss_false_positive:  "排除誤報",
+  escalate:                "升級案件",
+  request_monitoring:      "加強監控",
+}
+
+export const DECISION_COLOR: Record<string, string> = {
+  confirm_suspicious:     "bg-red-50 text-[#e53935] border-red-300 hover:bg-red-100",
+  dismiss_false_positive: "bg-green-50 text-[#43a047] border-green-300 hover:bg-green-100",
+  escalate:               "bg-orange-50 text-[#fb8c00] border-orange-300 hover:bg-orange-100",
+  request_monitoring:     "bg-blue-50 text-[#1976d2] border-blue-300 hover:bg-blue-100",
+}
+
+export const TIMELINE_TYPE_ZH: Record<string, string> = {
+  login:  "登入",
+  trade:  "交易",
+  crypto: "加密貨幣",
+  fiat:   "法幣",
+}

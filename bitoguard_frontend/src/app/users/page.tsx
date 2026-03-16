@@ -1,8 +1,9 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { Suspense, useMemo, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { api } from "@/lib/api"
+import { useSearchParams } from "next/navigation"
 import { ErrorBanner } from "@/components/ErrorBanner"
 import { CASE_STATUS_ZH } from "@/lib/labels"
 
@@ -12,8 +13,10 @@ function walletRoleLabel(direction: unknown): string {
   return "交易對象錢包"
 }
 
-export default function UsersPage() {
-  const [selectedUserId, setSelectedUserId] = useState<string>("")
+function UsersPageContent() {
+  const searchParams = useSearchParams()
+  const urlUserId = searchParams.get("userId") ?? ""
+  const [selectedUserId, setSelectedUserId] = useState<string>(urlUserId)
 
   const { data: alertsData, isLoading: isAlertsLoading, error: alertsError } = useQuery({
     queryKey: ["alerts", "all"],
@@ -27,7 +30,8 @@ export default function UsersPage() {
     [alertsData],
   )
   const activeUserId =
-    (selectedUserId && userIds.includes(selectedUserId) && selectedUserId)
+    (selectedUserId && selectedUserId)
+    || urlUserId
     || userIds[0]
     || ""
 
@@ -196,5 +200,13 @@ export default function UsersPage() {
         </div>
       )}
     </div>
+  )
+}
+
+export default function UsersPage() {
+  return (
+    <Suspense fallback={<div className="text-[#9ca3af] text-center py-8">載入中...</div>}>
+      <UsersPageContent />
+    </Suspense>
   )
 }
