@@ -8,6 +8,7 @@ import pandas as pd
 
 from config import load_settings
 from db.store import DuckDBStore, make_id, utc_now
+from models.anomaly import build_raw_iforest_features
 from models.common import encode_features, feature_columns, load_feature_table, load_iforest, load_joblib
 from models.rule_engine import evaluate_rules
 from services.alert_engine import generate_alerts
@@ -122,18 +123,20 @@ def score_latest_snapshot() -> pd.DataFrame:
     ])
     model_probability = stacker_model.predict_proba(branch_matrix)[:, 1]
 
-    # IsolationForest anomaly branch — only active when m4_enabled=True.
-    # Default is False: v1 iforest artifacts are incompatible with v2 feature schema.
     if settings.m4_enabled:
         try:
             iforest_path, iforest_meta = _load_latest_model("iforest", "joblib")
             iforest_model = load_iforest(iforest_path)
-            a_cols  = feature_columns(scoring_frame)
-            x_anom, _ = encode_features(
-                scoring_frame, a_cols,
-                reference_columns=iforest_meta.get("encoded_columns"),
+            raw_cols = iforest_meta.get("raw_feature_columns", [])
+            if not raw_cols:
+                raise ValueError("IsolationForest metadata missing 'raw_feature_columns'. Retrain with: make train-iforest")
+            raw_df = build_raw_iforest_features(store, latest_date, scoring_frame["user_id"].tolist())
+            x_anom = (
+                raw_df.set_index("user_id")
+                .reindex(scoring_frame["user_id"].values)
+                .fillna(0)[raw_cols]
             )
-            anomaly_raw   = -iforest_model.score_samples(x_anom)
+            anomaly_raw   = -iforest_model.score_samples(x_anom.values)
             anomaly_score = (anomaly_raw - anomaly_raw.min()) / (anomaly_raw.max() - anomaly_raw.min() + 1e-9)
         except Exception:
             anomaly_score = np.zeros(len(scoring_frame))
@@ -160,9 +163,8 @@ def score_latest_snapshot() -> pd.DataFrame:
         + 0.10 * result["anomaly_score"]
         + 0.20 * result["rule_score"]
     ) * 100.0
-    # Risk score ceiling with M1+M3 active (no M4/M5):
-    # max risk_score = (0.20*rule_score + 0.70*model_prob) * 100 ≈ 57 at best.
-    # Thresholds must stay below 57 to produce any alerts. Do not revert to [-1,35,...].
+    # Risk score ceiling: with M1+M3+M4 active, max = (0.70+0.10+0.20)*100 = 100.
+    # Bins are calibrated for this full range.
     result["risk_level"] = pd.cut(
         result["risk_score"], bins=[-1, 20, 50, 70, 100],
         labels=["low", "medium", "high", "critical"],

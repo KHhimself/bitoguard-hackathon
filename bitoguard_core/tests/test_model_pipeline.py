@@ -1027,13 +1027,25 @@ def test_drift_detect_zero_rate_spike():
 
 
 def test_iforest_contamination_is_fixed() -> None:
-    """IsolationForest must use a fixed contamination, not derived from labels."""
+    """IsolationForest must use a fixed contamination, not derived from labels.
+
+    Labels (hidden_suspicious_label) may appear in the function to filter the
+    training set to negatives-only, but the contamination= argument itself must
+    be a hard-coded literal, not a computed value based on label counts.
+    """
     import inspect
     from models.anomaly import train_anomaly_model
     src = inspect.getsource(train_anomaly_model)
     assert "contamination=0.05" in src, "contamination should be fixed at 0.05"
-    assert "hidden_suspicious_label" not in src.split("contamination")[1].split("IsolationForest")[0], \
-        "IsolationForest contamination must not depend on hidden_suspicious_label"
+    # The IsolationForest constructor call must receive a literal — verify the
+    # argument text immediately following 'contamination=' is '0.05', not a variable.
+    import re
+    match = re.search(r"IsolationForest\(.*?contamination=([^,)]+)", src, re.DOTALL)
+    assert match is not None, "IsolationForest constructor not found in source"
+    contamination_value = match.group(1).strip()
+    assert contamination_value == "0.05", (
+        f"IsolationForest contamination must be the literal 0.05, got: {contamination_value!r}"
+    )
 
 
 
