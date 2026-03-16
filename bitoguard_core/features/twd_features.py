@@ -74,6 +74,45 @@ def compute_twd_features(
             row[f"{prefix}_gap_median"]      = g["gap_median"]
             row[f"{prefix}_rapid_1h_share"]  = g["rapid_1h_share"]
 
+        # --- Windowed velocity features (7d and 30d) ---
+        # Burst: sudden activity spikes after dormancy are a primary AML signal
+        dep_7d  = dep[dep["occurred_at"] >= ref - pd.Timedelta(days=7)]
+        dep_30d = dep[dep["occurred_at"] >= ref - pd.Timedelta(days=30)]
+        wdr_7d  = wdr[wdr["occurred_at"] >= ref - pd.Timedelta(days=7)]
+        wdr_30d = wdr[wdr["occurred_at"] >= ref - pd.Timedelta(days=30)]
+
+        row["twd_dep_7d_count"]  = int(len(dep_7d))
+        row["twd_dep_7d_sum"]    = float(dep_7d["amount_twd"].sum())
+        row["twd_wdr_7d_count"]  = int(len(wdr_7d))
+        row["twd_wdr_7d_sum"]    = float(wdr_7d["amount_twd"].sum())
+        row["twd_dep_30d_count"] = int(len(dep_30d))
+        row["twd_dep_30d_sum"]   = float(dep_30d["amount_twd"].sum())
+        row["twd_wdr_30d_count"] = int(len(wdr_30d))
+        row["twd_wdr_30d_sum"]   = float(wdr_30d["amount_twd"].sum())
+
+        # Burst ratio: 7-day activity vs. expected based on lifetime daily average
+        # >1 means recent spike; heavily suspicious at >5x
+        lifetime_dep_sum = float(dep["amount_twd"].sum())
+        daily_avg_dep    = lifetime_dep_sum / max(row["twd_span_days"], 7.0)
+        row["twd_dep_burst_ratio"] = float(
+            row["twd_dep_7d_sum"] / max(daily_avg_dep * 7, 1.0)
+        )
+
+        # Structuring score: fraction of deposits clustering near round NT$ thresholds
+        # NT$500,000 is a common AML reporting threshold; structuring deposits appear
+        # just below (e.g. 480k-499k). Round-number ratio captures similar smurfing.
+        if not dep.empty:
+            amounts = dep["amount_twd"]
+            # Fraction that are multiples of NT$10,000 (common structuring denomination)
+            row["twd_dep_round_10k_ratio"]  = float((amounts % 10_000 < 1.0).mean())
+            # Fraction just below NT$500k threshold (within 10% below)
+            row["twd_dep_near_500k_ratio"]  = float(
+                ((amounts >= 450_000) & (amounts < 500_000)).mean()
+            )
+        else:
+            row["twd_dep_round_10k_ratio"] = 0.0
+            row["twd_dep_near_500k_ratio"] = 0.0
+
         rows.append(row)
 
     return pd.DataFrame(rows).reset_index(drop=True)

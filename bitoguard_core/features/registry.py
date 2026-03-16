@@ -94,7 +94,7 @@ def build_v2_features(
         compute_profile_features(users, snapshot_date=snapshot_date,
                                   category_maps=category_maps),
         compute_twd_features(fiat, snapshot_date=snapshot_date),
-        compute_crypto_features(crypto),
+        compute_crypto_features(crypto, snapshot_date=snapshot_date),
         compute_swap_features(trades),
         compute_trading_features(trades),
         compute_ip_features(logins),
@@ -105,7 +105,7 @@ def build_v2_features(
     probe_fns = [
         None,
         lambda: compute_twd_features(_make_probe_fiat()),
-        lambda: compute_crypto_features(_make_probe_crypto()),
+        lambda: compute_crypto_features(_make_probe_crypto(), snapshot_date=snapshot_date),
         lambda: compute_swap_features(_make_probe_trades()),
         lambda: compute_trading_features(_make_probe_trades()),
         lambda: compute_ip_features(_make_probe_logins()),

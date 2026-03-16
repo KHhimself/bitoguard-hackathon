@@ -6,10 +6,17 @@ from features.twd_features import _agg_stats, _gap_stats
 TRX_ASSETS = frozenset({"TRX", "TRC20"})
 
 
-def compute_crypto_features(crypto: pd.DataFrame) -> pd.DataFrame:
-    """~33 crypto transfer features per user (lifetime, no is_internal column)."""
+def compute_crypto_features(
+    crypto: pd.DataFrame,
+    snapshot_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """~43 crypto transfer features per user (lifetime + 7d/30d windows)."""
     if crypto.empty:
         return pd.DataFrame()
+
+    ref = pd.Timestamp.now(tz="UTC") if snapshot_date is None else snapshot_date
+    if ref.tzinfo is None:
+        ref = ref.tz_localize("UTC")
 
     df = crypto.copy()
     df["occurred_at"] = pd.to_datetime(df["occurred_at"], utc=True, errors="coerce")
@@ -70,6 +77,26 @@ def compute_crypto_features(crypto: pd.DataFrame) -> pd.DataFrame:
             row[f"{prefix}_gap_p10"]         = g["gap_p10"]
             row[f"{prefix}_gap_median"]      = g["gap_median"]
             row[f"{prefix}_rapid_1h_share"]  = g["rapid_1h_share"]
+
+        # --- Windowed velocity features (7d and 30d) ---
+        # Crypto withdrawals shortly after fiat deposits = primary cash-out indicator
+        wdr_7d  = wdr[wdr["occurred_at"] >= ref - pd.Timedelta(days=7)]
+        wdr_30d = wdr[wdr["occurred_at"] >= ref - pd.Timedelta(days=30)]
+        dep_7d  = dep[dep["occurred_at"] >= ref - pd.Timedelta(days=7)]
+
+        row["crypto_wdr_7d_count"]  = int(len(wdr_7d))
+        row["crypto_wdr_7d_sum"]    = float(wdr_7d["amount_twd_equiv"].sum())
+        row["crypto_wdr_30d_count"] = int(len(wdr_30d))
+        row["crypto_wdr_30d_sum"]   = float(wdr_30d["amount_twd_equiv"].sum())
+        row["crypto_dep_7d_count"]  = int(len(dep_7d))
+        row["crypto_dep_7d_sum"]    = float(dep_7d["amount_twd_equiv"].sum())
+
+        # Burst ratio: recent 7-day crypto withdrawal vs. expected from lifetime average
+        crypto_span = max(row["crypto_span_days"], 7.0)
+        lifetime_daily_wdr = float(wdr["amount_twd_equiv"].sum()) / crypto_span
+        row["crypto_wdr_burst_ratio"] = float(
+            row["crypto_wdr_7d_sum"] / max(lifetime_daily_wdr * 7, 1.0)
+        )
 
         rows.append(row)
 
