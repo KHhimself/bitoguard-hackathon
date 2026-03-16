@@ -76,7 +76,7 @@ interface ModelMetrics {
   scenario_breakdown: ScenarioRow[]
   pr_curve?: { precision: number[]; recall: number[]; thresholds: number[] }
   // OOF stacker fields (true, leakage-free generalization metrics)
-  oof_metrics?: { catboost: OofMetrics; lgbm: OofMetrics; stacker: OofMetrics }
+  oof_metrics?: { catboost: OofMetrics; lgbm: OofMetrics; xgboost?: OofMetrics; stacker: OofMetrics }
   oracle_precision_at_k?: Record<string, OraclePrecisionAtK>
   dataset_stats?: { users: number; positives: number; positive_rate: number; features: number }
 }
@@ -246,14 +246,15 @@ export default function ModelOpsPage() {
                 <h2 className="text-[14px] font-semibold text-[#1a1d2e]">OOF 堆疊模型 — 真實泛化指標</h2>
                 <span className="ml-auto text-[11px] text-[#9ca3af]">5-fold StratifiedGroupKFold, leakage-free</span>
               </div>
-              <div className="p-4 grid grid-cols-3 gap-4">
-                {(["catboost", "lgbm", "stacker"] as const).map((branch) => {
-                  const m = metrics.oof_metrics![branch]
+              <div className={`p-4 grid gap-4 ${metrics.oof_metrics?.xgboost ? "grid-cols-4" : "grid-cols-3"}`}>
+                {(["catboost", "lgbm", ...(metrics.oof_metrics?.xgboost ? ["xgboost"] : []), "stacker"] as const).map((branch) => {
+                  const m = metrics.oof_metrics![branch as keyof typeof metrics.oof_metrics]
+                  if (!m) return null
                   const isStacker = branch === "stacker"
                   return (
                     <div key={branch} className={`rounded-lg p-3 ${isStacker ? "bg-[#eef0fa]" : "bg-[#f9fafb]"}`}>
                       <p className="text-[11px] font-semibold text-[#6b7280] uppercase tracking-wider mb-2">
-                        {branch === "catboost" ? "CatBoost" : branch === "lgbm" ? "LightGBM" : "Stacker (meta)"}
+                        {branch === "catboost" ? "CatBoost" : branch === "lgbm" ? "LightGBM" : branch === "xgboost" ? "XGBoost" : "Stacker (meta)"}
                       </p>
                       <div className="space-y-1.5">
                         <div className="flex justify-between items-baseline">

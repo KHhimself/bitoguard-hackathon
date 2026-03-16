@@ -518,6 +518,10 @@ def model_metrics() -> dict[str, Any]:
     # Augment with OOF stacker metrics from the CV report (true generalization estimate,
     # leakage-free). The holdout report may have inflated metrics due to peer-percentile
     # feature leakage; OOF is the authoritative performance measure for production.
+    #
+    # Source priority:
+    # 1. 5fold_cv_report_*.json — comprehensive report with oracle P@K and dataset stats
+    # 2. models/cv_results_*.json — latest stacker CV results (updated after every retrain)
     cv_candidates = sorted(
         settings.artifact_dir.glob("5fold_cv_report_*.json"),
         key=lambda p: p.stat().st_mtime,
@@ -534,6 +538,25 @@ def model_metrics() -> dict[str, Any]:
             base["dataset_stats"] = cv_report.get("dataset", {})
         except Exception:
             pass
+
+    # Override oof_metrics with latest stacker cv_results if newer or 5fold report absent
+    stacker_cv_candidates = sorted(
+        (settings.artifact_dir / "models").glob("cv_results_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if stacker_cv_candidates:
+        try:
+            sc = json.loads(stacker_cv_candidates[0].read_text(encoding="utf-8"))
+            # Map stacker cv_results "oof" → {"catboost": {auc, pr_auc}, "lgbm": ...,
+            # "xgboost": ..., "stacker": ...} for the frontend OOF panel
+            raw_oof = sc.get("oof", {})
+            if raw_oof:
+                if not cv_candidates or stacker_cv_candidates[0].stat().st_mtime > cv_candidates[0].stat().st_mtime:
+                    base["oof_metrics"] = raw_oof
+        except Exception:
+            pass
+
     return base
 
 

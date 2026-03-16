@@ -2,12 +2,12 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { AlertTriangle, Activity, Network, BarChart2, Users } from "lucide-react"
+import { LayoutDashboard, AlertTriangle, Network, BarChart2, Users } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const NAV_ITEMS = [
+  { href: "/",          label: "儀表板",      icon: LayoutDashboard, exact: true },
   { href: "/alerts",    label: "警示中心",    icon: AlertTriangle },
-  { href: "/alerts/report", label: "風險診斷",  icon: Activity },
   { href: "/users",     label: "用戶全貌",    icon: Users },
   { href: "/graph",     label: "關聯圖探索",  icon: Network },
   { href: "/model-ops", label: "模型指標",    icon: BarChart2 },
@@ -34,10 +34,12 @@ export function Sidebar() {
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-0.5">
         <p className="px-2 pb-2 text-[11px] font-semibold text-[#9ca3af] uppercase tracking-wider">分析工具</p>
-        {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const active = href === "/alerts"
+        {NAV_ITEMS.map(({ href, label, icon: Icon, exact }) => {
+          const active = exact
             ? pathname === href
-            : pathname === href || pathname.startsWith(href + "/")
+            : href === "/alerts"
+              ? pathname === href || pathname.startsWith(href + "/")
+              : pathname === href || pathname.startsWith(href + "/")
           return (
             <Link
               key={href}
