@@ -40,6 +40,7 @@ def train_stacker(n_folds: int = 5) -> dict:
     dataset = load_v2_training_dataset()
     feature_cols = [c for c in dataset.columns
                     if c not in NON_FEATURE_COLUMNS and c != "hidden_suspicious_label"]
+    # cat_indices are positional; _PROP_FEATURE_COLS appended later must remain numeric
     cat_indices  = [i for i, c in enumerate(feature_cols) if c in CAT_FEATURE_NAMES]
 
     date_splits   = forward_date_splits(dataset["snapshot_date"])
@@ -83,6 +84,7 @@ def train_stacker(n_folds: int = 5) -> dict:
             user_ids=list(train_df["user_id"]),
         )
         prop_df = prop_df.set_index("user_id")[_PROP_FEATURE_COLS].fillna(0)
+        prop_df = prop_df[~prop_df.index.duplicated(keep="last")]
         prop_aligned = prop_df.reindex(train_df["user_id"].values).fillna(0).reset_index(drop=True)
         x_fold_aug = pd.concat(
             [x_train_df.reset_index(drop=True), prop_aligned], axis=1,
@@ -139,34 +141,24 @@ def train_stacker(n_folds: int = 5) -> dict:
     print(f"{'='*50}")
 
     # Retrain full base models on all training data
+    # Branch C is used for OOF AUC measurement only. Final models use label-free features.
+    # Wiring Branch C into score.py is a known follow-up task.
     pos_all = max(1, int(y_train.sum()))
     neg_all = max(1, len(y_train) - pos_all)
-
-    # Branch C for final models: use all training labels
-    all_labels = pd.Series(y_train, index=train_df["user_id"].values)
-    prop_final_df = compute_label_propagation(
-        edges, all_labels,
-        user_ids=list(train_df["user_id"]),
-    )
-    prop_final_df = prop_final_df.set_index("user_id")[_PROP_FEATURE_COLS].fillna(0)
-    prop_final_aligned = prop_final_df.reindex(train_df["user_id"].values).fillna(0).reset_index(drop=True)
-    x_train_final_aug = pd.concat(
-        [x_train_df.reset_index(drop=True), prop_final_aligned], axis=1,
-    )
 
     final_cb = CatBoostClassifier(
         iterations=300, learning_rate=0.05, depth=6,
         scale_pos_weight=neg_all / pos_all, cat_features=cat_indices,
         random_seed=42, verbose=0,
     )
-    final_cb.fit(x_train_final_aug, y_train)
+    final_cb.fit(x_train_df, y_train)
 
     final_lgbm = LGBMClassifier(
         n_estimators=250, learning_rate=0.05, num_leaves=31,
         subsample=0.9, colsample_bytree=0.9,
         scale_pos_weight=neg_all / pos_all, random_state=42,
     )
-    final_lgbm.fit(x_train_final_aug, y_train)
+    final_lgbm.fit(x_train_df, y_train)
 
     now_str   = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     version   = f"stacker_{now_str}"
@@ -178,8 +170,6 @@ def train_stacker(n_folds: int = 5) -> dict:
     save_joblib(final_cb,   cb_path)
     save_joblib(final_lgbm, lgbm_path)
     save_joblib(meta,       meta_path)
-
-    feature_cols_with_prop = feature_cols + _PROP_FEATURE_COLS
 
     cv_summary = {
         "n_folds": n_folds,
@@ -201,9 +191,7 @@ def train_stacker(n_folds: int = 5) -> dict:
 
     meta_dict = {
         "stacker_version": version,
-        # NOTE: score.py does not yet consume propagation features at inference time;
-        # wiring Branch C into the scoring path is a known follow-up task.
-        "feature_columns": feature_cols_with_prop,
+        "feature_columns": feature_cols,
         "branch_models": {"catboost": str(cb_path), "lgbm": str(lgbm_path)},
         "stacker_path": str(meta_path),
         "meta_coefs": meta.coef_.tolist(),
