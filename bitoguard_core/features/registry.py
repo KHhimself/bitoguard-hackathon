@@ -138,23 +138,12 @@ def build_v2_features(
         new_cols = [c for c in module_df.columns if c not in base.columns or c == "user_id"]
         base = base.merge(module_df[new_cols], on="user_id", how="left")
 
-    # Rule signals: evaluate M1 rules on the assembled v2 frame and add outputs
-    # as features. This lets the stacker learn interactions between rule firings
-    # and behavioral features (e.g., fast_cash_out_2h AND high crypto volume).
-    try:
-        rule_df = compute_rule_features(base, snapshot_date=snapshot_date)
-        if rule_df is not None and not rule_df.empty:
-            new_rule_cols = [c for c in rule_df.columns if c not in base.columns or c == "user_id"]
-            base = base.merge(rule_df[new_rule_cols], on="user_id", how="left")
-    except Exception:
-        pass  # Rule features are best-effort; missing → 0 via fillna below
-
     # fillna(0) covers users absent from a partial module result
     base = base.fillna(0)
 
     # --- Cross-channel derived features ---
-    # These ratios require both fiat and crypto columns to be present; they capture
-    # the classic fiat-in→crypto-out layering pattern (core money laundering typology).
+    # Computed BEFORE rule signals so that xch_layering_intensity is available
+    # to the layering_burst rule in compute_rule_features().
     if "twd_dep_sum" in base.columns and "crypto_wdr_twd_sum" in base.columns:
         base["xch_cashout_ratio_lifetime"] = (
             base["crypto_wdr_twd_sum"] / (base["twd_dep_sum"] + 1.0)
@@ -171,10 +160,50 @@ def build_v2_features(
         ).clip(upper=10.0)
 
     # Layering intensity: cross-channel velocity burst (crypto out burst + fiat in burst)
+    # Must be before rule signals — layering_burst rule fires when this >= 5.0.
     if "twd_dep_burst_ratio" in base.columns and "crypto_wdr_burst_ratio" in base.columns:
         base["xch_layering_intensity"] = (
             base["twd_dep_burst_ratio"] * base["crypto_wdr_burst_ratio"]
         ).clip(upper=100.0)
+
+    # --- High-signal interaction features (derived from top-importance features) ---
+    # These combine the top LightGBM gain features to pre-compute interactions
+    # that tree models may miss when features span many decision boundaries.
+
+    # TRX/TRC20 exposure × withdrawal volume: high-value USDT-Tron transfers are
+    # the dominant AML vector in Asian crypto (Elliptic 2023, CipherTrace 2024).
+    if "crypto_trx_tx_share" in base.columns and "crypto_wdr_twd_sum" in base.columns:
+        base["trx_volume_signal"] = (
+            base["crypto_trx_tx_share"] * (base["crypto_wdr_twd_sum"].clip(upper=1e7) / 1e6)
+        ).clip(upper=50.0)
+
+    # Early activity density: high volume in first 3 days relative to total age
+    # captures mule accounts that transact immediately and then slow down.
+    if "early_3d_volume" in base.columns and "account_age_days" in base.columns:
+        base["early_activity_ratio"] = (
+            base["early_3d_volume"] / (base["account_age_days"].clip(lower=1.0) * 1000.0)
+        ).clip(upper=10.0)
+
+    # Cross-channel cashout × TRX share: high cashout ratio with TRX preference
+    # captures the USDT-Tron layering pattern (fiat in → swap to USDT-TRC20 → out).
+    if "xch_cashout_ratio_lifetime" in base.columns and "crypto_trx_tx_share" in base.columns:
+        base["trx_cashout_signal"] = (
+            base["xch_cashout_ratio_lifetime"] * base["crypto_trx_tx_share"]
+        ).clip(upper=10.0)
+
+    # Rule signals: evaluate M1 rules on the assembled v2 frame (including cross-channel)
+    # and add outputs as features. This lets the stacker learn interactions between
+    # rule firings and behavioral features (e.g., fast_cash_out_2h AND high crypto volume).
+    try:
+        rule_df = compute_rule_features(base, snapshot_date=snapshot_date)
+        if rule_df is not None and not rule_df.empty:
+            new_rule_cols = [c for c in rule_df.columns if c not in base.columns or c == "user_id"]
+            base = base.merge(rule_df[new_rule_cols], on="user_id", how="left")
+    except Exception:
+        pass  # Rule features are best-effort; missing → 0 via fillna below
+
+    # fillna(0) for rule columns and any remaining NaN
+    base = base.fillna(0)
 
     return base.reset_index(drop=True)
 

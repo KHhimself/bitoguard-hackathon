@@ -10,7 +10,7 @@ Why rule signals as features (not filters):
     features give the stacker awareness of what M1 is seeing.
 
 Output columns (all prefixed with `rule_`):
-  11 binary flags (0/1 int), rule_score (float 0-1), rule_hit_count (int ≥ 0)
+  13 binary flags (0/1 int), rule_score (float 0-1), rule_hit_count (int ≥ 0)
 """
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ RULE_FEATURE_COLUMNS = [
     "rule_volume_vs_declared_mismatch",
     "rule_extreme_fiat_peer_volume",
     "rule_extreme_withdraw_peer_volume",
+    "rule_fiat_passthrough",
+    "rule_layering_burst",
     "rule_score",
     "rule_hit_count",
 ]
@@ -58,6 +60,8 @@ _RULE_FLAG_COLS = [
     "volume_vs_declared_mismatch",
     "extreme_fiat_peer_volume",
     "extreme_withdraw_peer_volume",
+    "fiat_passthrough",
+    "layering_burst",
 ]
 
 
@@ -102,13 +106,16 @@ def compute_rule_features(
                 "night_large_withdrawal_ratio", "new_device_ratio"):
         f[col] = 0
 
-    # Graph rules: disabled features remain 0
-    for col in ("shared_device_count", "blacklist_1hop_count",
-                "blacklist_2hop_count", "component_size"):
+    # Graph rules: blacklist/device features disabled (data quality issues)
+    for col in ("shared_device_count", "blacklist_1hop_count", "blacklist_2hop_count"):
         f[col] = 0
 
     # Fan-out: ip_n_entities (number of distinct users sharing an IP) is a proxy
     f["fan_out_ratio"] = v2_frame.get("ip_n_entities", pd.Series(0, index=v2_frame.index)).astype(float).values
+    # component_size proxy: ip_n_entities captures the same "large sharing network" signal;
+    # the high_fan_out rule gates on both fan_out_ratio AND component_size >= 5, so we
+    # use ip_n_entities for both to allow the rule to fire for users with many shared-IP peers.
+    f["component_size"] = v2_frame.get("ip_n_entities", pd.Series(0, index=v2_frame.index)).astype(float).values
 
     # Volume vs declared income (monthly_income_twd is NULL in current data → ratio ≈ 0)
     vol_total = (
@@ -118,9 +125,31 @@ def compute_rule_features(
     income = v2_frame.get("monthly_income_twd", pd.Series(1.0, index=v2_frame.index)).clip(lower=1.0)
     f["actual_volume_expected_ratio"] = (vol_total / income).values
 
-    # Peer percentiles: not computed in v2 → 0 (peer-volume rules won't fire)
-    f["fiat_in_30d_peer_pct"]         = 0.0
-    f["crypto_withdraw_30d_peer_pct"] = 0.0
+    # Peer percentiles: compute within-KYC cohort percentile ranks from v2 volume features.
+    # kyc_level_code (from profile features) provides the cohort key.
+    # rank(pct=True) gives each user's position in [0, 1] relative to peers.
+    kyc_code = v2_frame.get("kyc_level_code", pd.Series(0, index=v2_frame.index))
+    fiat_vol  = v2_frame.get("twd_dep_sum",       pd.Series(0.0, index=v2_frame.index))
+    wdr_vol   = v2_frame.get("crypto_wdr_twd_sum", pd.Series(0.0, index=v2_frame.index))
+    rank_df = pd.DataFrame(
+        {"kyc": kyc_code.values, "fiat_vol": fiat_vol.values, "wdr_vol": wdr_vol.values},
+        index=v2_frame.index,
+    )
+    if rank_df["kyc"].nunique() > 1:
+        f["fiat_in_30d_peer_pct"]         = rank_df.groupby("kyc")["fiat_vol"].rank(pct=True).values
+        f["crypto_withdraw_30d_peer_pct"] = rank_df.groupby("kyc")["wdr_vol"].rank(pct=True).values
+    else:
+        # Single cohort: rank globally (common in small/test datasets)
+        f["fiat_in_30d_peer_pct"]         = rank_df["fiat_vol"].rank(pct=True).values
+        f["crypto_withdraw_30d_peer_pct"] = rank_df["wdr_vol"].rank(pct=True).values
+
+    # New v2 cross-channel rules: pass through directly from the v2 feature set
+    f["fiat_dep_to_fiat_wdr_within_24h"] = (
+        v2_frame.get("fiat_dep_to_fiat_wdr_within_24h", pd.Series(0, index=v2_frame.index)).values
+    )
+    f["xch_layering_intensity"] = (
+        v2_frame.get("xch_layering_intensity", pd.Series(0.0, index=v2_frame.index)).values
+    )
 
     # Inject snapshot_date so evaluate_rules() can group correctly
     f["snapshot_date"] = snapshot_date.date()

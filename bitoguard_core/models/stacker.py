@@ -1,17 +1,16 @@
 # bitoguard_core/models/stacker.py
-"""Stacker: CatBoost + LightGBM + XGBoost OOF branches -> LR meta-learner + isotonic calibration.
+"""Stacker: CatBoost + LightGBM + XGBoost + ExtraTrees + RandomForest OOF branches -> LR meta-learner + isotonic calibration.
 
-Three-branch stacking:
+Five-branch stacking:
   A: CatBoostClassifier (depth-6, scale_pos_weight)
-  B: LGBMClassifier (num_leaves=31, subsample/colsample)
-  C: XGBClassifier (max_depth=6, scale_pos_weight)
+  B: LGBMClassifier (num_leaves=63, min_child_samples=5, subsample/colsample)
+  C: XGBClassifier (max_depth=6, gamma=0.1, scale_pos_weight)
+  D: ExtraTreesClassifier (fully random splits for maximum diversity)
+  E: RandomForestClassifier (best-of-sqrt-random-subset splits, orthogonal to ET)
 
-OOF meta-learner: LogisticRegression on [P_A, P_B, P_C] vectors.
+OOF meta-learner: LogisticRegression on logit([P_A, P_B, P_C, P_D, P_E]) vectors.
 Isotonic calibration: CalibratedClassifierCV(lr_meta, method='isotonic') fitted
 on OOF predictions to map uncalibrated log-odds to true probabilities.
-
-Note: Graph label propagation (Branch D) causes self-referential leakage in the
-OOF loop; wiring into score.py is a tracked follow-up task.
 """
 from __future__ import annotations
 from datetime import datetime, timezone
@@ -22,6 +21,12 @@ from catboost import CatBoostClassifier
 from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
 from sklearn.calibration import CalibratedClassifierCV
+try:
+    from sklearn.frozen import FrozenEstimator  # sklearn >= 1.6
+    _HAS_FROZEN = True
+except ImportError:
+    _HAS_FROZEN = False
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.model_selection import StratifiedGroupKFold
@@ -56,6 +61,8 @@ def train_stacker(n_folds: int = 5) -> dict:
     oof_cb   = np.zeros(len(x_train_df))
     oof_lgbm = np.zeros(len(x_train_df))
     oof_xgb  = np.zeros(len(x_train_df))
+    oof_et   = np.zeros(len(x_train_df))
+    oof_rf   = np.zeros(len(x_train_df))
 
     # XGBoost needs numeric-only data — encode categoricals as integer codes
     x_train_np = x_train_df.copy()
@@ -71,9 +78,9 @@ def train_stacker(n_folds: int = 5) -> dict:
         print(f"\n[Fold {fold_i}/{n_folds}] train={len(tr_idx):,} val={len(val_idx):,} pos_rate={pos/len(tr_idx):.2%}")
 
         cb = CatBoostClassifier(
-            iterations=200, learning_rate=0.05, depth=6,
+            iterations=300, learning_rate=0.05, depth=6,
             scale_pos_weight=neg / pos, cat_features=cat_indices,
-            random_seed=42, verbose=0,
+            l2_leaf_reg=5, random_seed=42, verbose=0,
         )
         cb.fit(x_train_df.iloc[tr_idx], y_train[tr_idx])
         oof_cb[val_idx] = cb.predict_proba(x_train_df.iloc[val_idx])[:, 1]
@@ -81,8 +88,12 @@ def train_stacker(n_folds: int = 5) -> dict:
         cb_ap  = average_precision_score(y_train[val_idx], oof_cb[val_idx])
         print(f"  CatBoost   AUC={cb_auc:.4f}  PR-AUC={cb_ap:.4f}")
 
+        # Branch B: LGBM with larger leaves and stronger regularization for imbalanced data.
+        # num_leaves=63 captures finer patterns; min_child_samples=5 allows small clusters
+        # of positives to form their own leaf (critical at 2.5% prevalence).
         lgbm = LGBMClassifier(
-            n_estimators=200, learning_rate=0.05, num_leaves=31,
+            n_estimators=300, learning_rate=0.05, num_leaves=63,
+            min_child_samples=5, reg_alpha=0.1, reg_lambda=1.0,
             subsample=0.9, colsample_bytree=0.9,
             scale_pos_weight=neg / pos, random_state=42, verbose=-1,
         )
@@ -93,10 +104,11 @@ def train_stacker(n_folds: int = 5) -> dict:
         print(f"  LightGBM   AUC={lgbm_auc:.4f}  PR-AUC={lgbm_ap:.4f}")
 
         # Branch C: XGBoost — different split-finding algorithm (exact) and
-        # regularization (L1+L2), reduces correlation with CB/LGBM predictions.
+        # regularization (L1+L2); gamma=0.1 requires meaningful gain before splitting.
         xgb = XGBClassifier(
-            n_estimators=200, learning_rate=0.05, max_depth=6,
-            subsample=0.9, colsample_bytree=0.9,
+            n_estimators=300, learning_rate=0.05, max_depth=6,
+            subsample=0.9, colsample_bytree=0.9, gamma=0.1,
+            reg_alpha=0.05, reg_lambda=1.0,
             scale_pos_weight=neg / pos, random_state=42,
             eval_metric="logloss", verbosity=0, use_label_encoder=False,
         )
@@ -106,32 +118,76 @@ def train_stacker(n_folds: int = 5) -> dict:
         xgb_ap  = average_precision_score(y_train[val_idx], oof_xgb[val_idx])
         print(f"  XGBoost    AUC={xgb_auc:.4f}  PR-AUC={xgb_ap:.4f}")
 
+        # Branch D: ExtraTrees — fully random split selection maximizes diversity
+        # relative to gradient-boosted branches A/B/C, reducing ensemble variance
+        # on the rare positive class where individual trees disagree most.
+        et = ExtraTreesClassifier(
+            n_estimators=200, max_depth=10, min_samples_leaf=3,
+            class_weight={0: 1, 1: neg / pos},
+            random_state=42, n_jobs=-1,
+        )
+        et.fit(x_train_np[tr_idx], y_train[tr_idx])
+        oof_et[val_idx] = et.predict_proba(x_train_np[val_idx])[:, 1]
+        et_auc = roc_auc_score(y_train[val_idx], oof_et[val_idx])
+        et_ap  = average_precision_score(y_train[val_idx], oof_et[val_idx])
+        print(f"  ExtraTrees AUC={et_auc:.4f}  PR-AUC={et_ap:.4f}")
+
+        # Branch E: RandomForest — bootstrapped bagging + random feature subsets.
+        # RF uses best-of-random-subset splits (vs ExtraTrees' fully random splits),
+        # giving better individual-tree calibration while still providing diversity
+        # orthogonal to gradient-boosted branches. The combination of ET + RF provides
+        # two different tree-bagging perspectives to the meta-learner.
+        rf = RandomForestClassifier(
+            n_estimators=200, max_depth=10, min_samples_leaf=3,
+            max_features="sqrt", class_weight={0: 1, 1: neg / pos},
+            random_state=43, n_jobs=-1,
+        )
+        rf.fit(x_train_np[tr_idx], y_train[tr_idx])
+        oof_rf[val_idx] = rf.predict_proba(x_train_np[val_idx])[:, 1]
+        rf_auc = roc_auc_score(y_train[val_idx], oof_rf[val_idx])
+        rf_ap  = average_precision_score(y_train[val_idx], oof_rf[val_idx])
+        print(f"  RandomForest AUC={rf_auc:.4f}  PR-AUC={rf_ap:.4f}")
+
         fold_metrics.append({
             "fold": fold_i,
             "n_train": int(len(tr_idx)),
             "n_val": int(len(val_idx)),
-            "catboost": {"auc": round(cb_auc, 4), "pr_auc": round(cb_ap, 4)},
-            "lgbm":     {"auc": round(lgbm_auc, 4), "pr_auc": round(lgbm_ap, 4)},
-            "xgboost":  {"auc": round(xgb_auc, 4), "pr_auc": round(xgb_ap, 4)},
+            "catboost":     {"auc": round(cb_auc, 4),   "pr_auc": round(cb_ap, 4)},
+            "lgbm":         {"auc": round(lgbm_auc, 4), "pr_auc": round(lgbm_ap, 4)},
+            "xgboost":      {"auc": round(xgb_auc, 4),  "pr_auc": round(xgb_ap, 4)},
+            "extratrees":   {"auc": round(et_auc, 4),   "pr_auc": round(et_ap, 4)},
+            "randomforest": {"auc": round(rf_auc, 4),   "pr_auc": round(rf_ap, 4)},
         })
 
     # OOF metrics across all folds
     oof_cb_auc   = roc_auc_score(y_train, oof_cb)
     oof_lgbm_auc = roc_auc_score(y_train, oof_lgbm)
     oof_xgb_auc  = roc_auc_score(y_train, oof_xgb)
+    oof_et_auc   = roc_auc_score(y_train, oof_et)
+    oof_rf_auc   = roc_auc_score(y_train, oof_rf)
     oof_cb_ap    = average_precision_score(y_train, oof_cb)
     oof_lgbm_ap  = average_precision_score(y_train, oof_lgbm)
     oof_xgb_ap   = average_precision_score(y_train, oof_xgb)
+    oof_et_ap    = average_precision_score(y_train, oof_et)
+    oof_rf_ap    = average_precision_score(y_train, oof_rf)
 
     print(f"\n{'='*55}")
-    print(f"OOF CatBoost  AUC={oof_cb_auc:.4f}  PR-AUC={oof_cb_ap:.4f}")
-    print(f"OOF LightGBM  AUC={oof_lgbm_auc:.4f}  PR-AUC={oof_lgbm_ap:.4f}")
-    print(f"OOF XGBoost   AUC={oof_xgb_auc:.4f}  PR-AUC={oof_xgb_ap:.4f}")
+    print(f"OOF CatBoost      AUC={oof_cb_auc:.4f}  PR-AUC={oof_cb_ap:.4f}")
+    print(f"OOF LightGBM      AUC={oof_lgbm_auc:.4f}  PR-AUC={oof_lgbm_ap:.4f}")
+    print(f"OOF XGBoost       AUC={oof_xgb_auc:.4f}  PR-AUC={oof_xgb_ap:.4f}")
+    print(f"OOF ExtraTrees    AUC={oof_et_auc:.4f}  PR-AUC={oof_et_ap:.4f}")
+    print(f"OOF RandomForest  AUC={oof_rf_auc:.4f}  PR-AUC={oof_rf_ap:.4f}")
 
-    # 3-branch meta-learner with isotonic calibration.
-    # Isotonic regression maps the LR's uncalibrated log-odds to true probabilities
-    # — critical when the stacker output range is compressed (max ≈ 0.37).
-    oof_matrix = np.column_stack([oof_cb, oof_lgbm, oof_xgb])
+    # 5-branch meta-learner with logit transform + isotonic calibration.
+    # Logit transform (log-odds) makes the meta-feature space linear for LR:
+    # if each branch is a calibrated probability estimate, the log-odds of each
+    # branch are approximately additive — making LR in logit space optimal.
+    # Clipping [1e-6, 1-1e-6] prevents -inf/+inf for saturated branch outputs.
+    def _logit(p: np.ndarray) -> np.ndarray:
+        p = np.clip(p, 1e-6, 1.0 - 1e-6)
+        return np.log(p / (1.0 - p))
+
+    oof_matrix = np.column_stack([_logit(oof_cb), _logit(oof_lgbm), _logit(oof_xgb), _logit(oof_et), _logit(oof_rf)])
     base_meta = LogisticRegression(C=1.0, max_iter=500, random_state=42)
     base_meta.fit(oof_matrix, y_train)
 
@@ -144,7 +200,9 @@ def train_stacker(n_folds: int = 5) -> dict:
     # Isotonic calibration on OOF predictions (leave-one-fold calibration
     # is nested inside StratifiedGroupKFold via cv='prefit', which uses the
     # already-OOF predictions — correct since oof_matrix has no training leakage).
-    meta = CalibratedClassifierCV(base_meta, method="isotonic", cv="prefit")
+    meta = (CalibratedClassifierCV(FrozenEstimator(base_meta), method="isotonic")
+            if _HAS_FROZEN else
+            CalibratedClassifierCV(base_meta, method="isotonic", cv="prefit"))
     meta.fit(oof_matrix, y_train)
     oof_stacker_preds = meta.predict_proba(oof_matrix)[:, 1]
     oof_stacker_auc = roc_auc_score(y_train, oof_stacker_preds)
@@ -159,36 +217,61 @@ def train_stacker(n_folds: int = 5) -> dict:
     neg_all = max(1, len(y_train) - pos_all)
 
     final_cb = CatBoostClassifier(
-        iterations=300, learning_rate=0.05, depth=6,
+        iterations=500, learning_rate=0.05, depth=6,
         scale_pos_weight=neg_all / pos_all, cat_features=cat_indices,
-        random_seed=42, verbose=0,
+        l2_leaf_reg=5, random_seed=42, verbose=0,
     )
     final_cb.fit(x_train_df, y_train)
 
     final_lgbm = LGBMClassifier(
-        n_estimators=250, learning_rate=0.05, num_leaves=31,
+        n_estimators=500, learning_rate=0.05, num_leaves=63,
+        min_child_samples=5, reg_alpha=0.1, reg_lambda=1.0,
         subsample=0.9, colsample_bytree=0.9,
         scale_pos_weight=neg_all / pos_all, random_state=42, verbose=-1,
     )
     final_lgbm.fit(x_train_df, y_train)
 
     final_xgb = XGBClassifier(
-        n_estimators=250, learning_rate=0.05, max_depth=6,
-        subsample=0.9, colsample_bytree=0.9,
+        n_estimators=500, learning_rate=0.05, max_depth=6,
+        subsample=0.9, colsample_bytree=0.9, gamma=0.1,
+        reg_alpha=0.05, reg_lambda=1.0,
         scale_pos_weight=neg_all / pos_all, random_state=42,
         eval_metric="logloss", verbosity=0, use_label_encoder=False,
     )
     final_xgb.fit(x_train_np, y_train)
 
-    # Refit calibrated meta-learner on full training data using all three branch predictions
-    full_branch_matrix = np.column_stack([
+    final_et = ExtraTreesClassifier(
+        n_estimators=300, max_depth=10, min_samples_leaf=3,
+        class_weight={0: 1, 1: neg_all / pos_all},
+        random_state=42, n_jobs=-1,
+    )
+    final_et.fit(x_train_np, y_train)
+
+    final_rf = RandomForestClassifier(
+        n_estimators=300, max_depth=10, min_samples_leaf=3,
+        max_features="sqrt", class_weight={0: 1, 1: neg_all / pos_all},
+        random_state=43, n_jobs=-1,
+    )
+    final_rf.fit(x_train_np, y_train)
+
+    # Refit calibrated meta-learner on full training data using all five branch predictions.
+    # Apply the same logit transform as the OOF meta-learner — the final model must
+    # receive log-odds inputs at fit time to match what score.py sends at inference time.
+    # Without this, the final meta-learner would be trained in probability space but
+    # called in logit space, causing a systematic prediction error.
+    full_branch_probs = np.column_stack([
         final_cb.predict_proba(x_train_df)[:, 1],
         final_lgbm.predict_proba(x_train_df)[:, 1],
         final_xgb.predict_proba(x_train_np)[:, 1],
+        final_et.predict_proba(x_train_np)[:, 1],
+        final_rf.predict_proba(x_train_np)[:, 1],
     ])
+    full_branch_matrix = np.column_stack([_logit(full_branch_probs[:, i]) for i in range(5)])
     final_base_meta = LogisticRegression(C=1.0, max_iter=500, random_state=42)
     final_base_meta.fit(full_branch_matrix, y_train)
-    final_meta = CalibratedClassifierCV(final_base_meta, method="isotonic", cv="prefit")
+    final_meta = (CalibratedClassifierCV(FrozenEstimator(final_base_meta), method="isotonic")
+                  if _HAS_FROZEN else
+                  CalibratedClassifierCV(final_base_meta, method="isotonic", cv="prefit"))
     final_meta.fit(full_branch_matrix, y_train)
 
     now_str   = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -197,45 +280,60 @@ def train_stacker(n_folds: int = 5) -> dict:
     cb_path   = mdir / f"cb_{now_str}.joblib"
     lgbm_path = mdir / f"lgbm_v2_{now_str}.joblib"
     xgb_path  = mdir / f"xgb_{now_str}.joblib"
+    et_path   = mdir / f"et_{now_str}.joblib"
+    rf_path   = mdir / f"rf_{now_str}.joblib"
     meta_path = mdir / f"{version}.joblib"
 
     save_joblib(final_cb,   cb_path)
     save_joblib(final_lgbm, lgbm_path)
     save_joblib(final_xgb,  xgb_path)
+    save_joblib(final_et,   et_path)
+    save_joblib(final_rf,   rf_path)
     save_joblib(final_meta, meta_path)
 
     cv_summary = {
         "n_folds": n_folds,
         "folds": fold_metrics,
         "oof": {
-            "catboost": {"auc": round(oof_cb_auc, 4),   "pr_auc": round(oof_cb_ap, 4)},
-            "lgbm":     {"auc": round(oof_lgbm_auc, 4), "pr_auc": round(oof_lgbm_ap, 4)},
-            "xgboost":  {"auc": round(oof_xgb_auc, 4),  "pr_auc": round(oof_xgb_ap, 4)},
-            "stacker":  {"auc": round(oof_stacker_auc, 4), "pr_auc": round(oof_stacker_ap, 4)},
+            "catboost":     {"auc": round(oof_cb_auc, 4),      "pr_auc": round(oof_cb_ap, 4)},
+            "lgbm":         {"auc": round(oof_lgbm_auc, 4),    "pr_auc": round(oof_lgbm_ap, 4)},
+            "xgboost":      {"auc": round(oof_xgb_auc, 4),     "pr_auc": round(oof_xgb_ap, 4)},
+            "extratrees":   {"auc": round(oof_et_auc, 4),      "pr_auc": round(oof_et_ap, 4)},
+            "randomforest": {"auc": round(oof_rf_auc, 4),      "pr_auc": round(oof_rf_ap, 4)},
+            "stacker":      {"auc": round(oof_stacker_auc, 4), "pr_auc": round(oof_stacker_ap, 4)},
         },
         "fold_mean": {
-            "catboost_auc": round(float(np.mean([f["catboost"]["auc"] for f in fold_metrics])), 4),
-            "catboost_std": round(float(np.std( [f["catboost"]["auc"] for f in fold_metrics])), 4),
-            "lgbm_auc":     round(float(np.mean([f["lgbm"]["auc"]     for f in fold_metrics])), 4),
-            "lgbm_std":     round(float(np.std( [f["lgbm"]["auc"]     for f in fold_metrics])), 4),
-            "xgboost_auc":  round(float(np.mean([f["xgboost"]["auc"]  for f in fold_metrics])), 4),
-            "xgboost_std":  round(float(np.std( [f["xgboost"]["auc"]  for f in fold_metrics])), 4),
+            "catboost_auc":     round(float(np.mean([f["catboost"]["auc"]     for f in fold_metrics])), 4),
+            "catboost_std":     round(float(np.std( [f["catboost"]["auc"]     for f in fold_metrics])), 4),
+            "lgbm_auc":         round(float(np.mean([f["lgbm"]["auc"]         for f in fold_metrics])), 4),
+            "lgbm_std":         round(float(np.std( [f["lgbm"]["auc"]         for f in fold_metrics])), 4),
+            "xgboost_auc":      round(float(np.mean([f["xgboost"]["auc"]      for f in fold_metrics])), 4),
+            "xgboost_std":      round(float(np.std( [f["xgboost"]["auc"]      for f in fold_metrics])), 4),
+            "extratrees_auc":   round(float(np.mean([f["extratrees"]["auc"]   for f in fold_metrics])), 4),
+            "extratrees_std":   round(float(np.std( [f["extratrees"]["auc"]   for f in fold_metrics])), 4),
+            "randomforest_auc": round(float(np.mean([f["randomforest"]["auc"] for f in fold_metrics])), 4),
+            "randomforest_std": round(float(np.std( [f["randomforest"]["auc"] for f in fold_metrics])), 4),
         },
     }
-    print(f"\nFold mean CatBoost AUC: {cv_summary['fold_mean']['catboost_auc']:.4f} ± {cv_summary['fold_mean']['catboost_std']:.4f}")
-    print(f"Fold mean LightGBM AUC: {cv_summary['fold_mean']['lgbm_auc']:.4f} ± {cv_summary['fold_mean']['lgbm_std']:.4f}")
-    print(f"Fold mean XGBoost  AUC: {cv_summary['fold_mean']['xgboost_auc']:.4f} ± {cv_summary['fold_mean']['xgboost_std']:.4f}")
+    print(f"\nFold mean CatBoost      AUC: {cv_summary['fold_mean']['catboost_auc']:.4f} ± {cv_summary['fold_mean']['catboost_std']:.4f}")
+    print(f"Fold mean LightGBM      AUC: {cv_summary['fold_mean']['lgbm_auc']:.4f} ± {cv_summary['fold_mean']['lgbm_std']:.4f}")
+    print(f"Fold mean XGBoost       AUC: {cv_summary['fold_mean']['xgboost_auc']:.4f} ± {cv_summary['fold_mean']['xgboost_std']:.4f}")
+    print(f"Fold mean ExtraTrees    AUC: {cv_summary['fold_mean']['extratrees_auc']:.4f} ± {cv_summary['fold_mean']['extratrees_std']:.4f}")
+    print(f"Fold mean RandomForest  AUC: {cv_summary['fold_mean']['randomforest_auc']:.4f} ± {cv_summary['fold_mean']['randomforest_std']:.4f}")
 
     meta_dict = {
         "stacker_version": version,
         "feature_columns": feature_cols,
         "branch_models": {
-            "catboost": str(cb_path),
-            "lgbm":     str(lgbm_path),
-            "xgboost":  str(xgb_path),
+            "catboost":     str(cb_path),
+            "lgbm":         str(lgbm_path),
+            "xgboost":      str(xgb_path),
+            "extratrees":   str(et_path),
+            "randomforest": str(rf_path),
         },
         "stacker_path": str(meta_path),
         "meta_coefs": base_meta.coef_.tolist(),
+        "meta_input_transform": "logit",  # branches transformed to log-odds before LR
         "cv_results": cv_summary,
     }
     save_json(meta_dict, meta_path.with_suffix(".json"))
@@ -247,9 +345,9 @@ def train_stacker(n_folds: int = 5) -> dict:
 
     return {
         "stacker_version": version,
-        "stacker_path": str(meta_path),
-        "branch_models": meta_dict["branch_models"],
-        "cv_results": cv_summary,
+        "stacker_path":    str(meta_path),
+        "branch_models":   meta_dict["branch_models"],
+        "cv_results":      cv_summary,
     }
 
 
