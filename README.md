@@ -8,7 +8,7 @@ BitoGuard is a production-minded Anti-Money Laundering (AML) / fraud-risk detect
 |--------|-------------|-----------|
 | M1: Rules | 11 deterministic AML rules, severity-weighted scoring | `bitoguard_core/models/rule_engine.py` |
 | M2: Statistical | Peer-deviation features, cohort percentile ranks, rolling windows | `bitoguard_core/features/build_features.py` |
-| M3: Supervised | CatBoost + LightGBM stacker, 5-fold OOF, AUC 0.9495 | `bitoguard_core/models/stacker.py`, `models/score.py` |
+| M3: Supervised | CatBoost + LightGBM stacker, 5-fold OOF, AUC 0.9495 | `bitoguard_core/models/stacker.py`, `bitoguard_core/models/score.py` |
 | M4: Anomaly | IsolationForest novelty detection, anomaly score + type | `bitoguard_core/models/anomaly.py` |
 | M5: Graph | NetworkX heterogeneous graph (IP/wallet/user), blacklist proximity | `bitoguard_core/features/graph_features.py` |
 | M6: Ops | SHAP case reports, incremental refresh, drift detection, AWS prep | `bitoguard_core/services/`, `pipeline/refresh_live.py` |
@@ -24,7 +24,7 @@ docker compose up --build
 cd bitoguard_core
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pip install -e bitoguard_core/
+pip install -e .
 
 # Run the backend test suite
 make test
