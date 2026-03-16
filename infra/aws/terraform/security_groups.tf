@@ -93,8 +93,8 @@ resource "aws_security_group" "efs" {
     from_port       = 2049
     to_port         = 2049
     protocol        = "tcp"
-    security_groups = [aws_security_group.backend.id]
-    description     = "NFS from backend"
+    security_groups = [aws_security_group.backend.id, aws_security_group.ecs_tasks.id]
+    description     = "NFS from backend and ML tasks"
   }
 
   egress {
@@ -107,5 +107,31 @@ resource "aws_security_group" "efs" {
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-efs-sg"
+  })
+}
+
+resource "aws_security_group" "ecs_tasks" {
+  name        = "${local.name_prefix}-ecs-tasks-sg"
+  description = "Security group for ECS ML pipeline tasks"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+    description = "All traffic from VPC"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "All outbound traffic"
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-ecs-tasks-sg"
   })
 }

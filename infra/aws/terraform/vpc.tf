@@ -1,5 +1,6 @@
-data "aws_availability_zones" "available" {
-  state = "available"
+# Use hardcoded AZs for Workshop accounts that don't have ec2:DescribeAvailabilityZones permission
+locals {
+  availability_zones = ["us-west-2a", "us-west-2b"]
 }
 
 resource "aws_vpc" "main" {
@@ -16,7 +17,7 @@ resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  availability_zone       = local.availability_zones[count.index]
   map_public_ip_on_launch = true
 
   tags = merge(local.common_tags, {
@@ -29,7 +30,7 @@ resource "aws_subnet" "private" {
   count             = 2
   vpc_id            = aws_vpc.main.id
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
+  availability_zone = local.availability_zones[count.index]
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-private-${count.index + 1}"

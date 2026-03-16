@@ -107,12 +107,39 @@ cd bitoguard_frontend && npm run lint && npm run build
 
 ## AWS Deployment
 
-Infrastructure artifacts are in `infra/aws/` and `scripts/`:
+Complete production-ready deployment using AWS managed services (ECS Fargate, ALB, EFS, ECR).
+
+### Quick Deploy
 
 ```bash
-# Requires AWS credentials + ECR/ECS setup:
-./scripts/build_and_push.sh    # Build + push images to ECR
-./scripts/deploy_aws.sh        # Register task defs + update ECS services
+# 1. Deploy infrastructure (one-time)
+cd infra/aws/terraform
+terraform init
+cp terraform.tfvars.example terraform.tfvars
+terraform apply
+
+# 2. Deploy application
+cd ../../..
+./scripts/deploy-aws.sh
+
+# 3. Get URL
+terraform output alb_url
 ```
 
-See `docs/RUNBOOK_AWS.md` and `docs/RELEASE_READINESS_CHECKLIST.md`.
+### Documentation
+
+- [Quick Start Guide](docs/QUICK_START_AWS.md) - Get running in 30 minutes
+- [Deployment Guide](docs/AWS_DEPLOYMENT_GUIDE.md) - Complete documentation
+- [Architecture](infra/aws/ARCHITECTURE.md) - AWS architecture deep dive
+- [Cost Optimization](docs/COST_OPTIMIZATION.md) - Reduce costs by 30-75%
+
+### What's Included
+
+- **Infrastructure-as-Code**: Terraform for all AWS resources
+- **High Availability**: Multi-AZ deployment with auto-scaling
+- **Monitoring**: CloudWatch logs, metrics, and alarms
+- **CI/CD**: GitHub Actions workflows
+- **Security**: Private subnets, security groups, encrypted storage
+- **Cost**: ~$190/month (optimizable to $50-140)
+
+See [README_AWS.md](README_AWS.md) for complete AWS deployment documentation.

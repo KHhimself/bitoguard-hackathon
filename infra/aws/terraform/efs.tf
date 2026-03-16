@@ -39,3 +39,25 @@ resource "aws_efs_access_point" "artifacts" {
     Name = "${local.name_prefix}-artifacts-ap"
   })
 }
+
+resource "aws_efs_access_point" "ml_pipeline" {
+  file_system_id = aws_efs_file_system.bitoguard.id
+
+  posix_user {
+    gid = 1000
+    uid = 1000
+  }
+
+  root_directory {
+    path = "/ml-pipeline"
+    creation_info {
+      owner_gid   = 1000
+      owner_uid   = 1000
+      permissions = "755"
+    }
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-ml-pipeline-ap"
+  })
+}

@@ -8,7 +8,7 @@ All Makefile targets run from the **project root** (`bitoguard-hackathon/`). The
 
 ### Setup
 ```bash
-make setup           # Create bitoguard_core/.venv and install Python deps (Python 3.12)
+make setup           # Create bitoguard_core/.venv and install Python deps (Python 3.13)
 cd bitoguard_frontend && npm install  # Install Node.js deps (Node 20+)
 cp bitoguard_frontend/.env.example bitoguard_frontend/.env.local  # Set BITOGUARD_INTERNAL_API_BASE=http://127.0.0.1:8001
 ```
@@ -33,12 +33,24 @@ make docker-up       # Full stack via Docker Compose
 ```
 
 ### Pipeline (run in order after first setup)
+
+**v1 pipeline** (LightGBM + IsolationForest, ~30 features):
 ```bash
 make sync            # Sync BitoPro data → raw.* tables in DuckDB
 make features        # Build graph + tabular feature snapshots
 make train           # Train LightGBM + IsolationForest
+make evaluate        # Temporal holdout evaluation (P@K, calibration)
 make score           # Score users → generate alerts
 make drift           # Feature drift detection between latest snapshots
+make refresh         # Incremental watermark-bounded refresh
+```
+
+**v2 pipeline** (CatBoost + LightGBM stacker, ~155 features):
+```bash
+make sync            # Same sync step
+make features-v2     # Build v2 feature snapshots → features.feature_snapshots_v2
+make train-stacker   # Train CatBoost + LightGBM OOF branches + LR meta-learner
+make score-v2        # Score latest v2 snapshot using stacker
 ```
 
 ### Linting
@@ -61,6 +73,8 @@ BitoGuard is a 6-module AML detection system for the BitoPro cryptocurrency exch
 | M4: Anomaly | IsolationForest novelty detection | `models/anomaly.py` |
 | M5: Graph | NetworkX heterogeneous graph (IP/wallet/device) | `features/graph_features.py` |
 | M6: Ops | SHAP case reports, drift detection, incremental refresh | `services/`, `pipeline/refresh_live.py` |
+| V2 Features | 8-module label-free registry (~155 cols/user) | `features/registry.py`, `features/build_features_v2.py` |
+| Stacker | CatBoost + LightGBM OOF → LR meta-learner (5-fold) | `models/stacker.py`, `models/train_catboost.py` |
 
 ### Data Flow
 
@@ -85,7 +99,7 @@ BitoPro API (https://aws-event-api.bitopro.com)
 `bitoguard_core/artifacts/bitoguard.duckdb` has 4 schemas:
 - **`raw`**: Ingested directly from source API (11 tables)
 - **`canonical`**: Normalized/deduped versions + `entity_edges` graph table
-- **`features`**: `graph_features`, `feature_snapshots_user_day`, `feature_snapshots_user_30d`
+- **`features`**: `graph_features`, `feature_snapshots_user_day`, `feature_snapshots_user_30d`, `feature_snapshots_v2`
 - **`ops`**: `model_predictions`, `alerts`, `cases`, `sync_runs`, `refresh_state`, `validation_reports`
 
 DuckDB allows **only one writer at a time**. If you see lock errors, check for other processes.
@@ -98,6 +112,8 @@ DuckDB allows **only one writer at a time**. If you see lock errors, check for o
 - **`models/common.py`**: Shared utilities: `feature_columns`, `encode_features`, `load_lgbm`, `load_iforest`.
 - **`pipeline/refresh_live.py`**: Incremental watermark-bounded refresh — updates only affected users.
 - **`oracle_client.py`** / **`source_client.py`**: HTTP clients for the oracle (labels) and source (events) APIs.
+- **`features/registry.py`**: Assembles 8 label-free feature modules (profile, twd, crypto, swap, trading, ip, sequence, bipartite) into one ~155-column master table. Always zero-fills missing module columns to keep schema stable.
+- **`features/graph_propagation.py`**: Label-aware propagation features (7 features). **Leakage contract**: must receive only training-fold labels; never called with test/validation labels. Used in the stacker per-fold, not in the static registry.
 
 ### Frontend: `bitoguard_frontend/`
 
@@ -154,7 +170,11 @@ tests/
 ├── test_model_pipeline.py     # 15 tests — temporal splits, refresh, drift
 ├── test_source_integration.py # 6 tests  — canonicalization, sync lifecycle
 ├── test_smoke.py              # 5 tests  — API smoke, alert/case lifecycle
-└── test_graph_data_quality.py # Graph data quality checks
+├── test_graph_data_quality.py # Graph data quality checks (placeholder device ID detection)
+├── test_stacker.py            # Stacker training + OOF shape/leakage checks
+├── test_feature_modules.py    # Per-module unit tests for all 8 v2 feature modules
+├── test_graph_bipartite.py    # Bipartite graph feature tests
+└── test_store.py              # DuckDBStore read/write tests
 ```
 
 Tests run against fixture data (no live API calls required by default).

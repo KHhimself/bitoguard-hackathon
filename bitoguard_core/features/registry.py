@@ -149,10 +149,19 @@ def build_and_store_v2_features(
     edges:         pd.DataFrame,
     snapshot_date: pd.Timestamp | None = None,
     store=None,
+    export_to_s3: bool = False,
 ) -> pd.DataFrame:
-    """Compute v2 features and persist to features.feature_snapshots_v2."""
+    """Compute v2 features and persist to features.feature_snapshots_v2.
+    
+    Args:
+        export_to_s3: If True, export feature snapshot to S3 (requires AWS credentials)
+    """
     from db.store import DuckDBStore, make_id
     from config import load_settings
+    import os
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     if snapshot_date is None:
         snapshot_date = pd.Timestamp.now(tz="UTC").normalize()
@@ -182,4 +191,53 @@ def build_and_store_v2_features(
     master.insert(3, "feature_version", FEATURE_VERSION_V2)
 
     store.replace_table("features.feature_snapshots_v2", master)
+    
+    # Export to S3 if enabled
+    if export_to_s3:
+        try:
+            from ml_pipeline.feature_store import FeatureStore
+            
+            # Get S3 configuration from environment
+            bucket_name = os.environ.get("BITOGUARD_ML_ARTIFACTS_BUCKET")
+            region = os.environ.get("AWS_REGION", "us-east-1")
+            
+            if not bucket_name:
+                logger.warning("S3 export requested but BITOGUARD_ML_ARTIFACTS_BUCKET not set")
+            else:
+                feature_store = FeatureStore(
+                    bucket_name=bucket_name,
+                    prefix="features",
+                    local_cache_dir=str(artifact_dir / "feature_cache"),
+                    region_name=region
+                )
+                
+                # Generate snapshot ID from timestamp
+                snapshot_id = snapshot_date.strftime("%Y%m%dT%H%M%SZ")
+                
+                # Prepare metadata
+                metadata = {
+                    "feature_version": FEATURE_VERSION_V2,
+                    "snapshot_date": str(snapshot_date.date()),
+                    "user_count": len(master),
+                    "feature_count": len(master.columns),
+                    "category_maps": category_maps
+                }
+                
+                # Save to S3
+                snapshot = feature_store.save_snapshot(
+                    df=master,
+                    snapshot_id=snapshot_id,
+                    metadata=metadata,
+                    partition_date=snapshot_date.to_pydatetime()
+                )
+                
+                logger.info(
+                    f"Exported feature snapshot to S3: {snapshot.s3_path} "
+                    f"({snapshot.row_count} rows, {snapshot.feature_count} features)"
+                )
+        
+        except Exception as e:
+            logger.error(f"Failed to export features to S3: {e}")
+            # Don't fail the entire pipeline if S3 export fails
+    
     return master

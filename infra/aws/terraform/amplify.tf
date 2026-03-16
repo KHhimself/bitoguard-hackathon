@@ -3,6 +3,7 @@
 # Ref: https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/amplify_app
 
 resource "aws_amplify_app" "frontend" {
+  count        = var.github_repo_url != "" ? 1 : 0
   name         = "${local.name_prefix}-frontend"
   repository   = var.github_repo_url
   access_token = var.github_access_token
@@ -37,7 +38,8 @@ resource "aws_amplify_app" "frontend" {
 }
 
 resource "aws_amplify_branch" "main" {
-  app_id      = aws_amplify_app.frontend.id
+  count       = var.github_repo_url != "" ? 1 : 0
+  app_id      = aws_amplify_app.frontend[0].id
   branch_name = "main"
   framework   = "Next.js - SSR"
   stage       = "PRODUCTION"
@@ -56,10 +58,10 @@ resource "aws_amplify_branch" "main" {
 
 output "amplify_app_url" {
   description = "Amplify app default domain"
-  value       = "https://main.${aws_amplify_app.frontend.default_domain}"
+  value       = var.github_repo_url != "" ? "https://main.${aws_amplify_app.frontend[0].default_domain}" : "N/A (no GitHub repo configured)"
 }
 
 output "amplify_app_id" {
   description = "Amplify app ID (for manual deploys)"
-  value       = aws_amplify_app.frontend.id
+  value       = var.github_repo_url != "" ? aws_amplify_app.frontend[0].id : "N/A"
 }
