@@ -1132,3 +1132,20 @@ def test_v2_training_query_excludes_positive_without_blacklist_date():
         "Positive user with no blacklist entry must be excluded from training"
     )
     conn.close()
+
+
+def test_iforest_schema_guard_if_model_exists() -> None:
+    """If an IsolationForest model artifact exists, its encoded_columns metadata
+    must be non-empty. A missing or empty list means the model was saved without
+    schema info and would silently zero all anomaly scores at scoring time."""
+    import json
+    from models.common import model_dir
+    iforest_metas = sorted(model_dir().glob("iforest_*.json"))
+    if not iforest_metas:
+        pytest.skip("No IsolationForest model found — skip schema check")
+    meta = json.loads(iforest_metas[-1].read_text())
+    encoded_cols = meta.get("encoded_columns", [])
+    assert len(encoded_cols) > 0, (
+        f"IsolationForest metadata at {iforest_metas[-1]} is missing 'encoded_columns'. "
+        "Retrain with negatives-only data on v2 features before enabling m4_enabled=True."
+    )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 import pandas as pd
+import pytest
 
 from api.main import app
 from config import load_settings
@@ -514,3 +515,31 @@ def test_score_v2_uses_transaction_for_db_write():
         assert not store.execute.called or all(
             "DELETE" not in str(call) for call in store.execute.call_args_list
         ), "store.execute(DELETE) must not be called outside a transaction"
+
+
+@pytest.mark.integration
+def test_alerts_generated_after_scoring() -> None:
+    """Guards against threshold miscalibration causing zero alerts.
+
+    This is an INTEGRATION test — it reads from the live bitoguard.duckdb.
+    Run manually after `make score` with real data:
+
+        pytest tests/test_smoke.py::test_alerts_generated_after_scoring -m integration -v
+
+    Not included in the default `make test` suite (excluded via addopts in pyproject.toml).
+    """
+    from config import load_settings
+    from db.store import DuckDBStore
+
+    settings = load_settings()
+    store = DuckDBStore(settings.db_path)
+    df = store.fetch_df(
+        "SELECT COUNT(*) AS cnt FROM ops.alerts WHERE risk_level IN ('medium', 'high', 'critical')"
+    )
+    count = int(df["cnt"].iloc[0]) if not df.empty else 0
+    assert count > 0, (
+        "Zero non-low alerts in ops.alerts. "
+        "Check: (1) m1_enabled=True and m3_enabled=True in config.py defaults, "
+        "(2) alert bins=[-1,20,50,70,100] in score.py score_latest_snapshot(). "
+        "Run `make score` with real data first."
+    )
