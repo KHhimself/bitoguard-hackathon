@@ -280,18 +280,22 @@ def score_latest_snapshot_v2() -> pd.DataFrame:
     ])
     model_probability = stacker_model.predict_proba(branch_matrix)[:, 1]
 
-    # IsolationForest anomaly branch (v1 model — reuse if available)
-    try:
-        iforest_path, iforest_meta = _load_latest_model("iforest", "joblib")
-        iforest_model = load_iforest(iforest_path)
-        a_cols  = feature_columns(scoring_frame)
-        x_anom, _ = encode_features(
-            scoring_frame, a_cols,
-            reference_columns=iforest_meta.get("encoded_columns"),
-        )
-        anomaly_raw   = -iforest_model.score_samples(x_anom)
-        anomaly_score = (anomaly_raw - anomaly_raw.min()) / (anomaly_raw.max() - anomaly_raw.min() + 1e-9)
-    except Exception:
+    # IsolationForest anomaly branch — only active when m4_enabled=True.
+    # Default is False: v1 iforest artifacts are incompatible with v2 feature schema.
+    if settings.m4_enabled:
+        try:
+            iforest_path, iforest_meta = _load_latest_model("iforest", "joblib")
+            iforest_model = load_iforest(iforest_path)
+            a_cols  = feature_columns(scoring_frame)
+            x_anom, _ = encode_features(
+                scoring_frame, a_cols,
+                reference_columns=iforest_meta.get("encoded_columns"),
+            )
+            anomaly_raw   = -iforest_model.score_samples(x_anom)
+            anomaly_score = (anomaly_raw - anomaly_raw.min()) / (anomaly_raw.max() - anomaly_raw.min() + 1e-9)
+        except Exception:
+            anomaly_score = np.zeros(len(scoring_frame))
+    else:
         anomaly_score = np.zeros(len(scoring_frame))
 
     # Rule engine via v2→v1 compat shim
