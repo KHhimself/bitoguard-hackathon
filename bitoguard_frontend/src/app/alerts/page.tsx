@@ -1,9 +1,10 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { api, type RiskLevel } from "@/lib/api"
 import Link from "next/link"
+import { useSearchParams, useRouter } from "next/navigation"
 import { AlertTriangle, ChevronRight } from "lucide-react"
 import { ErrorBanner } from "@/components/ErrorBanner"
 import { ALERT_STATUS_ZH } from "@/lib/labels"
@@ -20,8 +21,25 @@ const RISK_ZH: Record<NonNullable<RiskLevel>, string> = {
 }
 
 export default function AlertCenterPage() {
-  const [filter, setFilter] = useState<string>("all")
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const [filter, setFilter] = useState<string>(searchParams.get("risk_level") ?? "all")
   const [page, setPage] = useState<number>(1)
+
+  // Sync URL param changes (e.g. back button navigation)
+  useEffect(() => {
+    const rl = searchParams.get("risk_level")
+    setFilter(rl ?? "all")
+    setPage(1)
+  }, [searchParams])
+
+  function changeFilter(value: string) {
+    setFilter(value)
+    setPage(1)
+    const params = new URLSearchParams()
+    if (value !== "all") params.set("risk_level", value)
+    router.replace(`/alerts${params.size ? `?${params}` : ""}`, { scroll: false })
+  }
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["alerts", filter, page],
@@ -49,10 +67,7 @@ export default function AlertCenterPage() {
         {FILTERS.map((f) => (
           <button
             key={f.value}
-            onClick={() => {
-              setFilter(f.value)
-              setPage(1)
-            }}
+            onClick={() => changeFilter(f.value)}
             className={`px-4 py-1.5 rounded-full text-[13px] font-medium border transition-colors ${
               filter === f.value
                 ? "bg-[#5c6bc0] text-white border-[#5c6bc0]"

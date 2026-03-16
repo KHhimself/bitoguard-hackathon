@@ -163,12 +163,20 @@ def score_latest_snapshot() -> pd.DataFrame:
         + 0.10 * result["anomaly_score"]
         + 0.20 * result["rule_score"]
     ) * 100.0
-    # Risk score ceiling: with M1+M3+M4 active, max = (0.70+0.10+0.20)*100 = 100.
-    # Bins are calibrated for this full range.
-    result["risk_level"] = pd.cut(
-        result["risk_score"], bins=[-1, 20, 50, 70, 100],
-        labels=["low", "medium", "high", "critical"],
-    ).astype(str)
+
+    # Percentile-based risk tiering — the stacker outputs uncalibrated log-odds
+    # so absolute thresholds are model-version-dependent. Capacity-based tiers
+    # reflect real AML investigation throughput: top 1% = critical (≈ P@K ≥ 90%),
+    # top 5% = high, top 20% = medium, rest = low.
+    n = len(result)
+    rank = result["risk_score"].rank(ascending=False, method="first")
+    result["risk_level"] = np.select(
+        [rank <= max(1, int(n * 0.01)),
+         rank <= max(1, int(n * 0.05)),
+         rank <= max(1, int(n * 0.20))],
+        ["critical", "high", "medium"],
+        default="low",
+    )
     result["top_reason_codes"] = result["rule_hits"]
     result["prediction_time"]  = utc_now()
     result["model_version"]    = stacker_meta["stacker_version"]
