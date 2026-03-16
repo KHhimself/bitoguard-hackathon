@@ -66,6 +66,63 @@ def test_propagation_no_leakage():
     assert u1["prop_ip"] > 0.0
 
 
+def test_temporal_filtering_excludes_future_edges():
+    """Edges after snapshot_date must not influence features (no temporal leakage)."""
+    edges = pd.DataFrame([
+        {
+            "src_type": "user", "src_id": "u1",
+            "relation_type": "login_from_ip", "dst_type": "ip", "dst_id": "ip_shared",
+            "snapshot_time": "2025-10-01T00:00:00+00:00",
+        },
+        {
+            "src_type": "user", "src_id": "u2",
+            "relation_type": "login_from_ip", "dst_type": "ip", "dst_id": "ip_shared",
+            "snapshot_time": "2026-06-01T00:00:00+00:00",   # after the cutoff
+        },
+    ])
+    cutoff = pd.Timestamp("2025-12-31T23:59:59+00:00")
+
+    result = compute_bipartite_features(edges, ["u1", "u2"], snapshot_date=cutoff)
+
+    # u2's edge is after the cutoff, so ip_shared should have degree 1 (only u1)
+    u1 = result[result["user_id"] == "u1"].iloc[0]
+    u2 = result[result["user_id"] == "u2"].iloc[0]
+
+    assert u1["ip_n_entities"] == 1, "u1 has one IP edge before the cutoff"
+    # ip_shared degree is 1 (only u1's edge survives), so no shared-IP peers for u1
+    assert u1["rel_peer_count"] == 0, "u2's edge is filtered out, so u1 has no IP peers"
+
+    assert u2["ip_n_entities"] == 0, "u2's edge is after the cutoff and must be filtered"
+    assert u2["graph_is_isolated"] == 1, "u2 has no valid edges before the cutoff"
+
+
+def test_temporal_filtering_none_uses_all_edges():
+    """When snapshot_date=None, all edges are used (backward compatibility)."""
+    edges = pd.DataFrame([
+        {
+            "src_type": "user", "src_id": "u1",
+            "relation_type": "owns_wallet", "dst_type": "wallet", "dst_id": "w_shared",
+            "snapshot_time": "2025-10-01T00:00:00+00:00",
+        },
+        {
+            "src_type": "user", "src_id": "u2",
+            "relation_type": "owns_wallet", "dst_type": "wallet", "dst_id": "w_shared",
+            "snapshot_time": "2026-06-01T00:00:00+00:00",
+        },
+    ])
+
+    result = compute_bipartite_features(edges, ["u1", "u2"], snapshot_date=None)
+
+    u1 = result[result["user_id"] == "u1"].iloc[0]
+    u2 = result[result["user_id"] == "u2"].iloc[0]
+
+    # Both edges are present → w_shared degree is 2, each user sees 1 wallet peer
+    assert u1["wallet_n_entities"] == 1
+    assert u2["wallet_n_entities"] == 1
+    assert u1["rel_peer_count"] == 1, "u1 and u2 share w_shared, so they are peers"
+    assert u2["rel_peer_count"] == 1
+
+
 def test_no_redundant_rel_in_degree():
     """rel_in_degree must not appear in output — it was always identical to rel_out_degree."""
     import pandas as pd

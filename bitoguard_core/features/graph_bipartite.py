@@ -43,9 +43,17 @@ def _degree_buckets(entity_degrees: list[int]) -> dict[str, int]:
 def compute_bipartite_features(
     edges: pd.DataFrame,
     user_ids: list[str],
+    snapshot_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """Compute ~40 label-free bipartite graph features for the given user_ids."""
+    """Compute ~40 label-free bipartite graph features for the given user_ids.
+
+    When snapshot_date is provided, only edges with snapshot_time <= snapshot_date
+    are used to prevent temporal leakage.
+    """
     user_set = set(user_ids)
+
+    if snapshot_date is not None and "snapshot_time" in edges.columns:
+        edges = edges[pd.to_datetime(edges["snapshot_time"]) <= snapshot_date]
 
     ip_user_ents:     defaultdict[str, set[str]] = defaultdict(set)
     ip_ent_users:     defaultdict[str, set[str]] = defaultdict(set)

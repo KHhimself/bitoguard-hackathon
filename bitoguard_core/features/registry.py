@@ -99,7 +99,7 @@ def build_v2_features(
         compute_trading_features(trades),
         compute_ip_features(logins),
         compute_sequence_features(fiat, trades, crypto),
-        compute_bipartite_features(edges, user_ids),
+        compute_bipartite_features(edges, user_ids, snapshot_date=snapshot_date),
     ]
     # Paired probe functions for modules that need special probing
     probe_fns = [
