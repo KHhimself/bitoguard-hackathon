@@ -53,7 +53,9 @@ def compute_bipartite_features(
     user_set = set(user_ids)
 
     if snapshot_date is not None and "snapshot_time" in edges.columns:
-        edges = edges[pd.to_datetime(edges["snapshot_time"]) <= snapshot_date]
+        if snapshot_date.tzinfo is None:
+            snapshot_date = snapshot_date.tz_localize("UTC")
+        edges = edges[pd.to_datetime(edges["snapshot_time"], utc=True, errors="coerce") <= snapshot_date]
 
     ip_user_ents:     defaultdict[str, set[str]] = defaultdict(set)
     ip_ent_users:     defaultdict[str, set[str]] = defaultdict(set)
