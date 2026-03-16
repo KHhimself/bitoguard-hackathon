@@ -146,9 +146,9 @@ def load_hyperparameters(model_type: str, override_json: str, args) -> Dict[str,
     return hyperparams
 
 
-def train_lgbm(hyperparams: Dict[str, Any]) -> Dict[str, Any]:
+def train_stacker_model(hyperparams: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Train stacker (CatBoost + LightGBM branches + LR meta-learner).
+    Train CatBoost+LightGBM stacker.
 
     Args:
         hyperparams: Hyperparameters for training
@@ -224,28 +224,28 @@ def train_iforest(hyperparams: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def train_stacker_model(n_folds: int = 5) -> Dict[str, Any]:
+def train_stacker_kfold(n_folds: int = 5) -> Dict[str, Any]:
     """
     Train ensemble stacker with k-fold cross-validation.
-    
+
     Args:
         n_folds: Number of folds for cross-validation
-        
+
     Returns:
         Training result dictionary
     """
     print(f"Training Stacker with {n_folds}-fold cross-validation")
-    
+
     # Import stacker training function
     from models.stacker import train_stacker
-    
+
     # Call existing stacker training function
     result = train_stacker(n_folds=n_folds)
-    
+
     # Print metrics in SageMaker-compatible format
     print(f"stacker_version: {result['stacker_version']}")
     print(f"n_folds: {n_folds}")
-    
+
     return result
 
 
@@ -333,7 +333,7 @@ def main():
     if args.use_s3_data:
         training_df = load_training_data_from_path(args.input_data)
         print(f"Loaded {len(training_df)} rows from S3 input: {args.input_data}")
-        # NOTE: training_df is loaded but the underlying train_model/train_catboost/train_anomaly
+        # NOTE: training_df is loaded but the underlying train_stacker/train_catboost/train_anomaly
         # functions currently read data from DuckDB internally. Passing a DataFrame to them
         # is a follow-up task. This flag currently only validates the S3 data can be loaded.
         print("WARNING: --use_s3_data loaded data but training functions still read from DuckDB. "
@@ -361,13 +361,13 @@ def main():
     
     try:
         if args.model_type == 'lgbm':
-            result = train_lgbm(hyperparams)
+            result = train_stacker_model(hyperparams)
         elif args.model_type == 'catboost':
             result = train_catboost_model(hyperparams)
         elif args.model_type == 'iforest':
             result = train_iforest(hyperparams)
         elif args.model_type == 'stacker':
-            result = train_stacker_model(n_folds=args.n_folds)
+            result = train_stacker_kfold(n_folds=args.n_folds)
         else:
             raise ValueError(f"Unknown model type: {args.model_type}")
         

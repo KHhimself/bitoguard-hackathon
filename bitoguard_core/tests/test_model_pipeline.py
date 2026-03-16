@@ -11,7 +11,6 @@ from features.build_features import build_feature_snapshots
 from features.graph_features import build_graph_features
 from models.anomaly import train_anomaly_model
 from models.common import forward_date_splits, training_dataset
-from models.stacker import train_stacker
 from services.drift import detect_drift, FeatureDriftResult
 
 
