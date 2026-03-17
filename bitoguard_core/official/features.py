@@ -310,8 +310,9 @@ def build_official_features(
     twd_txn_velocity = _twd_per_day[["user_id", "twd_txn_velocity"]]
 
     # ── Round-number TWD amount ratio (structuring signal, sep=+0.108) ──────────
-    _twd_round = twd_transfer.copy()
-    _twd_round["_is_round"] = (_twd_round["amount_twd"] % 10000 == 0).astype(float)
+    # Use round+int to avoid floating-point precision issues (amounts are float from 1e-8 scaling)
+    _twd_round = twd_transfer[["user_id", "amount_twd"]].copy()
+    _twd_round["_is_round"] = ((_twd_round["amount_twd"].round().astype("int64") % 10000) == 0).astype("float32")
     twd_round_ratio = (
         _twd_round.groupby("user_id")["_is_round"]
         .mean()
