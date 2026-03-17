@@ -28,7 +28,11 @@ except ImportError:
     _HAS_FROZEN = False
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score,
+    f1_score, precision_score, recall_score, precision_recall_curve,
+    confusion_matrix,
+)
 from sklearn.model_selection import StratifiedGroupKFold
 
 from models.common import (
@@ -36,6 +40,22 @@ from models.common import (
     save_joblib, save_json,
 )
 from models.train_catboost import load_v2_training_dataset, CAT_FEATURE_NAMES
+
+# Auto-detect GPU: set BITOGUARD_USE_GPU=1 to force on, 0 to force off.
+# Falls back to detection via nvidia-smi when unset.
+import os as _os, subprocess as _sp
+def _detect_gpu() -> bool:
+    env = _os.environ.get("BITOGUARD_USE_GPU", "").strip()
+    if env == "1": return True
+    if env == "0": return False
+    try:
+        _sp.run(["nvidia-smi"], capture_output=True, check=True, timeout=5)
+        return True
+    except Exception:
+        return False
+_USE_GPU = _detect_gpu()
+if _USE_GPU:
+    print("[stacker] GPU detected — CatBoost + XGBoost will use CUDA")
 
 
 def train_stacker(n_folds: int = 5) -> dict:
@@ -81,6 +101,7 @@ def train_stacker(n_folds: int = 5) -> dict:
             iterations=300, learning_rate=0.05, depth=6,
             scale_pos_weight=neg / pos, cat_features=cat_indices,
             l2_leaf_reg=5, random_seed=42, verbose=0,
+            task_type="GPU" if _USE_GPU else "CPU",
         )
         cb.fit(x_train_df.iloc[tr_idx], y_train[tr_idx])
         oof_cb[val_idx] = cb.predict_proba(x_train_df.iloc[val_idx])[:, 1]
@@ -111,6 +132,7 @@ def train_stacker(n_folds: int = 5) -> dict:
             reg_alpha=0.05, reg_lambda=1.0,
             scale_pos_weight=neg / pos, random_state=42,
             eval_metric="logloss", verbosity=0, use_label_encoder=False,
+            device="cuda" if _USE_GPU else "cpu",
         )
         xgb.fit(x_train_np[tr_idx], y_train[tr_idx])
         oof_xgb[val_idx] = xgb.predict_proba(x_train_np[val_idx])[:, 1]
@@ -210,6 +232,35 @@ def train_stacker(n_folds: int = 5) -> dict:
     print(f"OOF Stacker (calibrated) AUC={oof_stacker_auc:.4f}  PR-AUC={oof_stacker_ap:.4f}")
     print(f"  Score range: [{oof_stacker_preds.min():.4f}, {oof_stacker_preds.max():.4f}]  "
           f"p99={np.percentile(oof_stacker_preds, 99):.4f}")
+
+    # ── OOF F1 / Precision / Recall at multiple thresholds (leakage-free) ─────
+    prevalence = y_train.mean()
+    prec_curve, rec_curve, thr_curve = precision_recall_curve(y_train, oof_stacker_preds)
+    f1_curve = np.where(
+        (prec_curve[:-1] + rec_curve[:-1]) > 0,
+        2 * prec_curve[:-1] * rec_curve[:-1] / (prec_curve[:-1] + rec_curve[:-1]),
+        0,
+    )
+    best_idx  = int(np.argmax(f1_curve))
+    best_thr  = float(thr_curve[best_idx])
+    best_f1   = float(f1_curve[best_idx])
+    best_prec = float(prec_curve[best_idx])
+    best_rec  = float(rec_curve[best_idx])
+
+    print(f"\nOOF Threshold sweep (stacker calibrated):")
+    print(f"{'Threshold':>10} {'Precision':>10} {'Recall':>8} {'F1':>8} {'Flagged':>8}")
+    for t in [0.10, 0.20, 0.30, 0.40, 0.50]:
+        pred = (oof_stacker_preds >= t).astype(int)
+        print(f"{t:>10.2f} "
+              f"{precision_score(y_train, pred, zero_division=0):>10.4f} "
+              f"{recall_score(y_train, pred, zero_division=0):>8.4f} "
+              f"{f1_score(y_train, pred, zero_division=0):>8.4f} "
+              f"{pred.sum():>8,}")
+    print(f"  Optimal-F1 @ threshold={best_thr:.4f}: "
+          f"P={best_prec:.4f}  R={best_rec:.4f}  F1={best_f1:.4f}  "
+          f"Lift={best_prec/prevalence:.1f}x")
+    tn, fp, fn, tp = confusion_matrix(y_train, (oof_stacker_preds >= best_thr).astype(int)).ravel()
+    print(f"  TP={tp}  FP={fp}  FN={fn}  TN={tn}")
     print(f"{'='*55}")
 
     # Retrain final models on all training data with more iterations
@@ -220,6 +271,7 @@ def train_stacker(n_folds: int = 5) -> dict:
         iterations=500, learning_rate=0.05, depth=6,
         scale_pos_weight=neg_all / pos_all, cat_features=cat_indices,
         l2_leaf_reg=5, random_seed=42, verbose=0,
+        task_type="GPU" if _USE_GPU else "CPU",
     )
     final_cb.fit(x_train_df, y_train)
 
@@ -237,6 +289,7 @@ def train_stacker(n_folds: int = 5) -> dict:
         reg_alpha=0.05, reg_lambda=1.0,
         scale_pos_weight=neg_all / pos_all, random_state=42,
         eval_metric="logloss", verbosity=0, use_label_encoder=False,
+        device="cuda" if _USE_GPU else "cpu",
     )
     final_xgb.fit(x_train_np, y_train)
 
@@ -291,6 +344,21 @@ def train_stacker(n_folds: int = 5) -> dict:
     save_joblib(final_rf,   rf_path)
     save_joblib(final_meta, meta_path)
 
+    # Compute OOF F1/precision/recall metrics for cv_results persistence
+    _oof_thresh_sweep = []
+    for _t in [0.10, 0.20, 0.30, 0.40, 0.50]:
+        _pred = (oof_stacker_preds >= _t).astype(int)
+        _oof_thresh_sweep.append({
+            "threshold": _t,
+            "precision": round(float(precision_score(y_train, _pred, zero_division=0)), 4),
+            "recall":    round(float(recall_score(y_train, _pred, zero_division=0)), 4),
+            "f1":        round(float(f1_score(y_train, _pred, zero_division=0)), 4),
+            "n_flagged": int(_pred.sum()),
+        })
+    _tn, _fp, _fn, _tp = confusion_matrix(
+        y_train, (oof_stacker_preds >= best_thr).astype(int)
+    ).ravel()
+
     cv_summary = {
         "n_folds": n_folds,
         "folds": fold_metrics,
@@ -301,6 +369,15 @@ def train_stacker(n_folds: int = 5) -> dict:
             "extratrees":   {"auc": round(oof_et_auc, 4),      "pr_auc": round(oof_et_ap, 4)},
             "randomforest": {"auc": round(oof_rf_auc, 4),      "pr_auc": round(oof_rf_ap, 4)},
             "stacker":      {"auc": round(oof_stacker_auc, 4), "pr_auc": round(oof_stacker_ap, 4)},
+        },
+        "oof_threshold": {
+            "optimal_threshold": round(best_thr, 4),
+            "optimal_f1":        round(best_f1, 4),
+            "optimal_precision": round(best_prec, 4),
+            "optimal_recall":    round(best_rec, 4),
+            "lift":              round(best_prec / max(prevalence, 1e-9), 2),
+            "tp": int(_tp), "fp": int(_fp), "fn": int(_fn), "tn": int(_tn),
+            "threshold_sweep": _oof_thresh_sweep,
         },
         "fold_mean": {
             "catboost_auc":     round(float(np.mean([f["catboost"]["auc"]     for f in fold_metrics])), 4),
