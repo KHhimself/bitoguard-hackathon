@@ -244,10 +244,47 @@ def build_official_features(
 
     fast_cashout = _fast_cashout_features(twd_transfer, crypto_transfer)
 
+    # ── Taiwan-time night & weekend TWD deposit/withdrawal timing features ─────
+    # Taiwan = UTC+8. Night = Taiwan 22:00-05:59 = UTC 14:00-21:59.
+    # Weekend adjustment: UTC hour >= 16 means Taiwan has crossed midnight.
+    twd_dep = twd_transfer[twd_transfer["kind_label"] == "deposit"].copy()
+    _dep_utc_hour = twd_dep["created_at"].dt.hour
+    twd_deposit_night = _boolean_ratio(
+        twd_dep, "user_id",
+        _dep_utc_hour.isin(range(14, 22)),
+        "twd_deposit_night_ratio_tw",
+    )
+    _dep_utc_weekday = twd_dep["created_at"].dt.dayofweek
+    _dep_tw_weekday = (_dep_utc_weekday + (_dep_utc_hour >= 16).astype(int)) % 7
+    twd_deposit_weekend = _boolean_ratio(
+        twd_dep, "user_id", _dep_tw_weekday.isin([5, 6]), "twd_deposit_weekend_ratio",
+    )
+    twd_wd = twd_transfer[twd_transfer["kind_label"] == "withdrawal"].copy()
+    _wd_utc_hour = twd_wd["created_at"].dt.hour
+    twd_withdraw_night = _boolean_ratio(
+        twd_wd, "user_id",
+        _wd_utc_hour.isin(range(14, 22)),
+        "twd_withdraw_night_ratio_tw",
+    )
+
+    # ── External crypto wallet diversity (structuring / layering signals) ──────
+    ct_ext_dep = crypto_transfer[
+        (crypto_transfer["kind_label"] == "deposit")
+        & (crypto_transfer["is_external_transfer"].eq(True))
+    ].copy()
+    crypto_dep_wallets = _nunique_or_empty(ct_ext_dep, "user_id", "from_wallet_hash", "crypto_unique_deposit_wallets")
+    ct_ext_wd = crypto_transfer[
+        (crypto_transfer["kind_label"] == "withdrawal")
+        & (crypto_transfer["is_external_transfer"].eq(True))
+    ].copy()
+    crypto_wd_wallets = _nunique_or_empty(ct_ext_wd, "user_id", "to_wallet_hash", "crypto_unique_withdraw_wallets")
+
     frames = [
         twd_stats, twd_deposit, twd_withdraw, twd_days, twd_last,
+        twd_deposit_night, twd_deposit_weekend, twd_withdraw_night,
         crypto_stats, crypto_withdraw, crypto_deposit, crypto_days, crypto_last, crypto_protocols,
         crypto_currencies, crypto_internal_ratio, relation_counts, relation_users,
+        crypto_dep_wallets, crypto_wd_wallets,
         trade_stats, trade_buy, trade_sell, trade_days, trade_night, trade_market, trade_source_api, trade_concentration,
         swap_stats, swap_buy, swap_sell, swap_days, swap_night,
         fast_cashout,

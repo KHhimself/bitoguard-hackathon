@@ -22,6 +22,8 @@ OUTLIER_BASE_COLUMNS = [
     "shared_ip_user_count",
     "shared_wallet_user_count",
     "relation_unique_counterparty_count",
+    "crypto_unique_deposit_wallets",
+    "crypto_unique_withdraw_wallets",
 ]
 
 
