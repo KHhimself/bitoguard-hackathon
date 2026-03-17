@@ -68,3 +68,9 @@ bitoguard_core/artifacts/models/official_lgbm_*.pkl
 bitoguard_core/artifacts/models/official_lgbm_*.json
 bitoguard_core/artifacts/models/official_iforest_*.pkl
 bitoguard_core/artifacts/models/official_iforest_*.json
+bitoguard_core/artifacts/models/official_catboost_base_*.pkl
+bitoguard_core/artifacts/models/official_graphsage_*.pt
+bitoguard_core/artifacts/models/official_stacker*.pkl
+bitoguard_core/artifacts/models/official_stacker_calibrator_*.pkl
+bitoguard_core/artifacts/transductive_v1/
+bitoguard_core/catboost_info/
