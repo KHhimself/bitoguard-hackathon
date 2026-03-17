@@ -125,7 +125,10 @@ def catboost_runtime_params() -> dict[str, Any]:
     params: dict[str, Any] = {
         "thread_count": profile.cpu_threads,
     }
-    if profile.gpu_enabled:
+    # BITOGUARD_CATBOOST_CPU_ONLY=1 forces CPU mode even when GPU is available.
+    # Useful for running GPU-accelerated GraphSAGE alongside CPU CatBoost.
+    catboost_cpu_only = os.getenv("BITOGUARD_CATBOOST_CPU_ONLY", "0").strip() == "1"
+    if profile.gpu_enabled and not catboost_cpu_only:
         params["task_type"] = "GPU"
         if profile.gpu_device_id is not None:
             params["devices"] = str(profile.gpu_device_id)
