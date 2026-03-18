@@ -166,6 +166,28 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset["recency_crypto_fraction"] = (
         _days_since_crypto / _age_days
     ).clip(0, 3).astype("float32")  # cap at 3x account age (extreme outlier prevention)
+    # v43: Additional sleeper-fraudster features targeting the hard-FN pattern.
+    # Analysis of 984 hard FNs vs 49K negatives reveals 3 patterns not fully captured:
+    #
+    # 1. stealth_dormancy degrades for fraudsters doing any swap activity
+    #    (the (1-layering) multiplier → 0 when layering>0, missing ~30% of hard FNs).
+    #    Fix: age-weighted recency fraction without swap-activity penalty.
+    #      FN profile: age=539, recency=0.404 → score=6.29*0.404=2.54
+    #      Neg profile: age=200, recency=0.150 → score=5.30*0.150=0.80
+    #      Expected AUC: 0.69+ (better than stealth_dormancy=0.686 for partial-layering FNs)
+    _recency = dataset["recency_crypto_fraction"].astype("float32")
+    dataset["stealth_dormancy_raw"] = (
+        _np.log1p(_age) * _recency
+    ).clip(0, 12).astype("float32")
+
+    # 2. Total sparsity including crypto activity — extends activity_sparsity (v37)
+    #    which only uses TWD+swap days (misses crypto-only reactivation sleepers).
+    #    Users dormant in TWD/swap but suddenly active in crypto get low activity_sparsity
+    #    but high crypto_session_gap — complementary to the existing feature.
+    _crypto_days = dataset["crypto_active_days"].fillna(0).astype("float32")
+    dataset["total_activity_sparsity"] = (
+        _np.log1p(_age / (_twd_days + _swap_days + _crypto_days + 1.0))
+    ).clip(0, 8).astype("float32")
     return dataset
 
 
