@@ -92,12 +92,24 @@ def fit_catboost(
     feature_columns: list[str],
     focal_gamma: float = 0.0,
     negative_weight: float = 1.0,
+    random_seed: int = RANDOM_SEED,
+    catboost_params: dict | None = None,
 ) -> ModelFitResult:
+    """Fit CatBoost classifier.
+
+    Parameters
+    ----------
+    catboost_params : Optional dict of CatBoost hyperparameters (from HPO).
+        Supported keys: depth, learning_rate, l2_leaf_reg, random_strength,
+        bagging_temperature, border_count, min_data_in_leaf, max_class_weight.
+        Any key not provided falls back to its default value.
+    """
     try:
         from catboost import CatBoostClassifier  # type: ignore
     except ImportError as exc:  # pragma: no cover - optional dependency path
         raise ImportError("CatBoost is not installed. Install catboost to enable this path.") from exc
 
+    hp = catboost_params or {}
     cat_features = [
         column for column in feature_columns
         if pd.api.types.is_object_dtype(train_frame[column])
@@ -107,18 +119,40 @@ def fit_catboost(
     y_train = train_frame["status"].astype(int)
     _positives = max(1, int(y_train.sum()))
     _negatives = max(1, len(y_train) - _positives)
-    # Pass class imbalance via class_weights in constructor rather than sample_weight in
-    # fit(). CatBoost GPU handles class_weights more stably (avoids probability inflation
-    # seen when sample_weight values are large). focal_gamma param accepted but ignored
-    # (kept for API compatibility; CatBoost Logloss is used for all cases).
-    class_weights = [float(negative_weight), _negatives / _positives]
+    # Cap class weight ratio. Uncapped 30x ratio causes Base B CatBoost to
+    # compress all probabilities near zero. Default cap is 10x.
+    _max_cw = hp.get("max_class_weight", 10.0)
+    _weight_ratio = min(float(_negatives) / _positives, _max_cw)
+    class_weights = [float(negative_weight), _weight_ratio]
     runtime_params = catboost_runtime_params()
+    # Allow catboost_params to override task_type (e.g. force CPU for secondary OOF
+    # to avoid GPU OOM when GPU is already saturated from primary training).
+    if "task_type" in hp:
+        runtime_params = dict(runtime_params)
+        runtime_params["task_type"] = hp["task_type"]
+        if hp["task_type"] == "CPU":
+            runtime_params.pop("devices", None)
+            runtime_params["thread_count"] = hardware_profile().cpu_threads
+    _depth = hp.get("depth", 7)
+    _lr = hp.get("learning_rate", 0.05)
+    _l2 = hp.get("l2_leaf_reg", 3.0)
+    _rs = hp.get("random_strength", 1.0)
+    _bt = hp.get("bagging_temperature", 1.0)
+    _bc = hp.get("border_count", 254)
+    _mdl = hp.get("min_data_in_leaf", 1)
     model = CatBoostClassifier(
         loss_function="Logloss",
         eval_metric="Logloss",
         class_weights=class_weights,
-        random_seed=RANDOM_SEED,
+        random_seed=random_seed,
         verbose=False,
+        depth=_depth,
+        learning_rate=_lr,
+        l2_leaf_reg=_l2,
+        random_strength=_rs,
+        bagging_temperature=_bt,
+        border_count=_bc,
+        min_data_in_leaf=_mdl,
         **runtime_params,
     )
     validation_probabilities: list[float] | None = None
@@ -126,18 +160,24 @@ def fit_catboost(
         y_valid = valid_frame["status"].astype(int)
         try:
             model.fit(train_frame[feature_columns], y_train, cat_features=cat_features,
-                      eval_set=(valid_frame[feature_columns], y_valid), use_best_model=False)
+                      eval_set=(valid_frame[feature_columns], y_valid),
+                      use_best_model=True, early_stopping_rounds=100)
         except Exception:
             if runtime_params.get("task_type") != "GPU":
                 raise
             model = CatBoostClassifier(
                 loss_function="Logloss", eval_metric="Logloss",
                 class_weights=class_weights,
-                random_seed=RANDOM_SEED, verbose=False,
+                random_seed=random_seed, verbose=False,
+                depth=_depth, learning_rate=_lr,
+                l2_leaf_reg=_l2, random_strength=_rs,
+                bagging_temperature=_bt, border_count=_bc,
+                min_data_in_leaf=_mdl,
                 task_type="CPU", thread_count=hardware_profile().cpu_threads,
             )
             model.fit(train_frame[feature_columns], y_train, cat_features=cat_features,
-                      eval_set=(valid_frame[feature_columns], y_valid), use_best_model=False)
+                      eval_set=(valid_frame[feature_columns], y_valid),
+                      use_best_model=True, early_stopping_rounds=100)
         validation_probabilities = model.predict_proba(valid_frame[feature_columns])[:, 1].tolist()
     else:
         try:
@@ -148,7 +188,11 @@ def fit_catboost(
             model = CatBoostClassifier(
                 loss_function="Logloss", eval_metric="Logloss",
                 class_weights=class_weights,
-                random_seed=RANDOM_SEED, verbose=False,
+                random_seed=random_seed, verbose=False,
+                depth=_depth, learning_rate=_lr,
+                l2_leaf_reg=_l2, random_strength=_rs,
+                bagging_temperature=_bt, border_count=_bc,
+                min_data_in_leaf=_mdl,
                 task_type="CPU", thread_count=hardware_profile().cpu_threads,
             )
             model.fit(train_frame[feature_columns], y_train, cat_features=cat_features)

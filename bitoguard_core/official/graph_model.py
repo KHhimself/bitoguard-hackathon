@@ -140,11 +140,19 @@ def train_graphsage_model(
     best_epoch = 0
     wait = 0
 
+    # Class-imbalanced BCE: cap pos_weight at 10x to prevent gradient explosion.
+    _train_labels = labels[train_mask]
+    _n_pos = max(1, int((_train_labels == 1.0).sum().item()))
+    _n_neg = max(1, int((_train_labels == 0.0).sum().item()))
+    _pos_weight = torch.tensor(min(float(_n_neg) / _n_pos, 10.0), device=device)
+
     for epoch in range(max_epochs):
         model.train()
         optimizer.zero_grad()
         logits = model(x, adjacency)
-        loss = F.binary_cross_entropy_with_logits(logits[train_mask], labels[train_mask])
+        loss = F.binary_cross_entropy_with_logits(
+            logits[train_mask], labels[train_mask], pos_weight=_pos_weight
+        )
         loss.backward()
         optimizer.step()
 

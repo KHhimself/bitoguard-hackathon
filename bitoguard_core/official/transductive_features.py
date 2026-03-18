@@ -217,6 +217,11 @@ def build_transductive_feature_frame(
     )
     propagation["has_positive_seed_path"] = propagation["nearest_positive_seed_distance"].ge(0).astype(int)
 
+    # v30: Negative-seed contrast features removed — they caused Base B AP to drop
+    # from 0.1013 → 0.0509 (halved). The negative-seed PPR/distance adds noise
+    # when negative labels are unreliable (many unlabeled true positives in the dataset,
+    # PU learning setting). Positive-seed propagation features are sufficient.
+
     result = pd.DataFrame({"user_id": graph.user_ids})
     for frame in (relation_stats, edge_type_stats, wallet_seed_stats, ip_seed_stats, component_stats, propagation):
         result = result.merge(frame, on="user_id", how="left")

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.svm import OneClassSVM
 
 from official.common import RANDOM_SEED, encode_frame, feature_output_path, load_official_paths, load_pickle, save_json, save_pickle
 from official.features import build_official_features
@@ -73,7 +75,11 @@ def score_anomaly_frame(frame: pd.DataFrame, model: object | None = None, meta: 
 def build_official_anomaly_features(cutoff_tag: str = "full") -> pd.DataFrame:
     frame = _load_training_frame(cutoff_tag)
     fit_frame = frame[frame["cohort"].isin(["train_only", "predict_only", "unlabeled_only"])].copy()
-    feature_columns = [column for column in frame.columns if column not in {"user_id", "cohort", "snapshot_cutoff_at", "snapshot_cutoff_tag", "status", "needs_prediction", "in_train_label", "in_predict_label", "is_shadow_overlap"}]
+    # Use only the focused financial columns rather than all features.
+    # IsolationForest with all ~200+ columns dilutes the anomaly signal —
+    # the 12 OUTLIER_BASE_COLUMNS capture the core transaction-volume behaviour
+    # that anomaly detection should focus on.
+    feature_columns = [col for col in OUTLIER_BASE_COLUMNS if col in frame.columns]
     x_fit, encoded_columns = encode_frame(fit_frame, feature_columns)
     contamination = max(0.01, float((fit_frame["status"] == 1).mean()))
     model = IsolationForest(
@@ -87,6 +93,20 @@ def build_official_anomaly_features(cutoff_tag: str = "full") -> pd.DataFrame:
         model=model,
         meta={"feature_columns": feature_columns, "encoded_columns": encoded_columns},
     )
+
+    # LOF: local outlier factor — captures density-based anomalies IsoForest misses.
+    # novelty=True required for score_samples() on unseen data.
+    x_all, _ = encode_frame(frame, feature_columns, reference_columns=encoded_columns)
+    lof = LocalOutlierFactor(n_neighbors=20, contamination=contamination, novelty=True)
+    lof.fit(x_fit)
+    lof_raw = -lof.score_samples(x_all)
+    result["lof_score"] = (lof_raw - lof_raw.min()) / (lof_raw.max() - lof_raw.min() + 1e-9)
+
+    # OCSVM: one-class SVM — captures non-linear decision boundaries.
+    ocsvm = OneClassSVM(kernel="rbf", nu=min(contamination, 0.5), gamma="scale")
+    ocsvm.fit(x_fit)
+    ocsvm_raw = -ocsvm.score_samples(x_all)
+    result["ocsvm_score"] = (ocsvm_raw - ocsvm_raw.min()) / (ocsvm_raw.max() - ocsvm_raw.min() + 1e-9)
 
     paths = load_official_paths()
     version = f"official_iforest_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"

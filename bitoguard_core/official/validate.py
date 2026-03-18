@@ -55,6 +55,30 @@ def validate_official_model() -> dict[str, Any]:
         selected_threshold,
     )
 
+    # Load HPO params for secondary validation consistency with primary
+    catboost_params = None
+    try:
+        from official.hpo import load_hpo_best_params
+        catboost_params = load_hpo_best_params()
+    except Exception:
+        pass
+
+    # Release GPU memory from primary OOF training before secondary OOF to
+    # prevent CatBoost CUDA OOM (GPU is saturated after primary + final training).
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+
+    # Force secondary OOF to CPU: secondary validation is evaluation-only and
+    # does not produce production artifacts, so GPU speed is not required.
+    secondary_catboost_params = dict(catboost_params or {})
+    secondary_catboost_params["task_type"] = "CPU"
+
     secondary_split = build_secondary_strict_splits(dataset, cutoff_tag="full", write_outputs=True)
     graph = build_transductive_graph(dataset)
     base_a_feature_columns = _label_free_feature_columns(dataset)
@@ -67,6 +91,7 @@ def validate_official_model() -> dict[str, Any]:
         base_a_feature_columns=base_a_feature_columns,
         base_b_feature_columns=base_b_feature_columns,
         graph_max_epochs=PRIMARY_GRAPH_MAX_EPOCHS,
+        catboost_params=secondary_catboost_params,
     )
     secondary_oof, _ = build_stacker_oof(
         secondary_oof,
@@ -102,6 +127,9 @@ def validate_official_model() -> dict[str, Any]:
         "primary_vs_secondary_delta": _metric_delta(primary_metrics, secondary_metrics),
     }
     report["grouped_oof_metrics"] = report["primary_transductive_oof_metrics"]
+    # Backward-compatible aliases for launch scripts that use short key names.
+    report["primary_validation"] = primary_metrics
+    report["secondary_stress"] = secondary_metrics
     save_json(report, feature_report_path("official_validation_report.json"))
     return report
 

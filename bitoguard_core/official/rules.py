@@ -28,4 +28,5 @@ def evaluate_official_rules(frame: pd.DataFrame) -> pd.DataFrame:
         lambda row: json.dumps([name for name in RULE_DEFINITIONS if bool(row[name])], ensure_ascii=False),
         axis=1,
     )
-    return result[["user_id", "rule_score", "top_reason_codes"]]
+    rule_flag_columns = list(RULE_DEFINITIONS)
+    return result[["user_id", "rule_score", "top_reason_codes"] + rule_flag_columns]
