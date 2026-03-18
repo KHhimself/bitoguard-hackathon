@@ -206,16 +206,19 @@ def run_hpo_study(
 
     def objective(trial: optuna.Trial) -> float:
         params = {
-            "depth": trial.suggest_int("depth", 4, 9),
+            "depth": trial.suggest_int("depth", 4, 10),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 30.0, log=True),
+            # v34: extend l2 upper bound (best was 25.7 near old limit of 30)
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 60.0, log=True),
             "random_strength": trial.suggest_float("random_strength", 0.1, 10.0, log=True),
-            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 5.0),
+            # v34: extend bagging upper bound (best was 3.89 near old limit of 5)
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 8.0),
             "border_count": trial.suggest_categorical("border_count", [32, 64, 128, 254]),
-            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 50),
+            # v34: extend min_data_in_leaf (more regularization options)
+            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 100),
             "iterations": 1500,
             "early_stopping_rounds": 100,
-            "max_class_weight": trial.suggest_float("max_class_weight", 5.0, 15.0),
+            "max_class_weight": trial.suggest_float("max_class_weight", 5.0, 20.0),
         }
 
         t0 = time.time()

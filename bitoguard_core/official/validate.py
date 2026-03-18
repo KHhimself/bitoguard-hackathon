@@ -74,10 +74,9 @@ def validate_official_model() -> dict[str, Any]:
     import gc
     gc.collect()
 
-    # Force secondary OOF to CPU: secondary validation is evaluation-only and
-    # does not produce production artifacts, so GPU speed is not required.
+    # v34: Allow secondary OOF to use GPU — cuda.empty_cache() + gc.collect()
+    # above releases primary training memory. GPU reduces secondary OOF from 45+ min to ~5 min.
     secondary_catboost_params = dict(catboost_params or {})
-    secondary_catboost_params["task_type"] = "CPU"
 
     secondary_split = build_secondary_strict_splits(dataset, cutoff_tag="full", write_outputs=True)
     graph = build_transductive_graph(dataset)

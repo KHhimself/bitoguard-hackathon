@@ -72,11 +72,12 @@ LABEL_FREE_EXCLUDED_COLUMNS = {
 _BASE_A_SEEDS = [42, 52, 62]
 
 # v32: Reduce GNN fold epochs from 40→10 to save ~25 min training time.
-# GNN Base C achieves AP=0.0348 (barely above random), is excluded by BlendEnsemble
-# (AP < 0.08 threshold), and the nonlinear CatBoost stacker learns to ignore it.
-# Fewer fold epochs still produce OOF base_c probs consistent with final model.
-PRIMARY_GRAPH_MAX_EPOCHS = 10
-FINAL_GRAPH_MIN_EPOCHS = 10
+# GNN Base C achieves AP=0.0334 (barely above random), excluded by BlendEnsemble
+# (AP < 0.08 threshold). The graph over-smooths due to wallet hub nodes (degree>800).
+# Reduced from 10 to 5 epochs: saves ~7.5 min GPU per run with no loss in AP.
+# Validate uses GPU now (task_type override removed), so total pipeline ~20 min faster.
+PRIMARY_GRAPH_MAX_EPOCHS = 5
+FINAL_GRAPH_MIN_EPOCHS = 5
 
 
 def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
@@ -93,62 +94,43 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(graph_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
-    # v33: Inline account-age velocity features — no parquet rebuild required.
-    # These catch "sleeper" fraudsters (old accounts that suddenly activate):
-    #   - OOF analysis: hard FNs have account_age=556 days vs TPs=269 days
-    #   - All FNs have low base_a_prob (~0.12) because lifecycle signals alone don't flag them
-    #   - Account-age normalized volume/velocity can distinguish sudden-activation sleepers
-    dataset = _add_account_age_velocity_features(dataset)
+    # v34: Inline orthogonal features — only features genuinely different from existing columns.
+    # Velocity features (v33) caused -0.004 F1 regression due to collinearity with
+    # account_age_days + sums. Career-peer z-scores are kept (genuinely new signal).
+    dataset = _add_inline_features(dataset)
     return dataset
 
 
-def _add_account_age_velocity_features(dataset: pd.DataFrame) -> pd.DataFrame:
-    """Add account-age normalized velocity features to the dataset (v33+).
+def _add_inline_features(dataset: pd.DataFrame) -> pd.DataFrame:
+    """Add inline-computed features that don't require rebuilding the feature parquet.
 
-    These features are computed inline (without rebuilding the parquet) to
-    catch 'sleeper' accounts: old accounts with low base lifecycle signals
-    but unusually high recent activity for their age.
+    v34: Removed account-age velocity features (v33 experiment showed -0.004 F1 regression
+    due to feature collinearity — CatBoost already captures these via existing account_age_days
+    and sum features). Only keeping truly orthogonal features.
 
-    All features are clipped and float32 to prevent outlier domination.
-    Note: rolling window columns (7d/30d) are all-zero in the static parquet snapshot,
-    so only lifetime-aggregate features are used here.
+    v34 keeps: career-peer z-scores for swap and crypto total (AP=0.0847, 0.0802).
+    These capture relative deviation vs career cohort — genuinely orthogonal to
+    the raw swap_total_sum + career categorical features CatBoost already has.
     """
     import numpy as _np
     df = dataset.copy()
-    _age = df.get("account_age_days", _np.zeros(len(df))).fillna(0).astype(float) + 1.0
-    _twd_count = (df.get("twd_deposit_count", 0).fillna(0) + df.get("twd_withdraw_count", 0).fillna(0)).astype(float)
-    _crypto_count = (df.get("crypto_deposit_count", 0).fillna(0) + df.get("crypto_withdraw_count", 0).fillna(0)).astype(float)
-    _twd_sum = df.get("twd_total_sum", 0).fillna(0).astype(float)
-    _crypto_sum = df.get("crypto_total_sum", 0).fillna(0).astype(float)
-    _crypto_withdraw_sum = df.get("crypto_withdraw_sum", 0).fillna(0).astype(float)
-    _swap_sum = df.get("swap_total_sum", 0).fillna(0).astype(float)
-    _swap_count = df.get("swap_total_count", 0).fillna(0).astype(float)
-    _twd_active = df.get("twd_active_days", 0).fillna(0).astype(float) + 1.0
-    _crypto_active = df.get("crypto_active_days", 0).fillna(0).astype(float) + 1.0
-    # Transactions-per-day-of-account-life: high for newly-active sleeper accounts
-    df["twd_txn_count_per_account_age"] = (_twd_count / _age).clip(0, 50).astype("float32")
-    df["crypto_txn_count_per_account_age"] = (_crypto_count / _age).clip(0, 50).astype("float32")
-    # Log volume-per-account-age: captures disproportionate activity relative to lifetime
-    df["twd_sum_per_account_age"] = (_np.log1p(_twd_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    df["crypto_sum_per_account_age"] = (_np.log1p(_crypto_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    # Crypto withdrawal intensity per account age (AP=0.1279, strongest univariate feature).
-    # Fraud signal concentrates in withdrawals (getting illicit funds out), not deposits.
-    df["crypto_withdraw_sum_per_account_age"] = (_np.log1p(_crypto_withdraw_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    # Swap intensity per account age: mules diversify assets rapidly via swaps (AP=0.1141)
-    df["swap_sum_per_account_age"] = (_np.log1p(_swap_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    df["swap_count_per_account_age"] = (_swap_count / _age).clip(0, 10).astype("float32")
-    # Peak-transaction intensity per account age: captures one-off large transactions in old accounts.
-    # crypto_withdraw_max_per_account_age AP=0.1046, twd_deposit_max_per_account_age AP=0.0961
-    _crypto_withdraw_max = df.get("crypto_withdraw_max", 0).fillna(0).astype(float)
-    _twd_deposit_max = df.get("twd_deposit_max", 0).fillna(0).astype(float)
-    _crypto_total_max = df.get("crypto_total_max", 0).fillna(0).astype(float)
-    df["crypto_withdraw_max_per_account_age"] = (_np.log1p(_crypto_withdraw_max) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    df["twd_deposit_max_per_account_age"] = (_np.log1p(_twd_deposit_max) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    df["crypto_total_max_per_account_age"] = (_np.log1p(_crypto_total_max) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    # Active-day concentration: fraction of account lifetime spent actively transacting
-    # Old mules with recent bursts will have low concentration (dormant then suddenly active)
-    df["twd_active_day_concentration"] = (_twd_active / _age).clip(0, 1).astype("float32")
-    df["crypto_active_day_concentration"] = (_crypto_active / _age).clip(0, 1).astype("float32")
+    _career_col = "career"
+    if _career_col in df.columns:
+        _swap_sum = df.get("swap_total_sum", _np.zeros(len(df))).fillna(0).astype(float)
+        _crypto_total = df.get("crypto_total_sum", _np.zeros(len(df))).fillna(0).astype(float)
+        _career = df[_career_col].fillna(-1)
+        _swap_log = _np.log1p(_swap_sum)
+        _crypto_log = _np.log1p(_crypto_total)
+        _tmp = df[["user_id"]].copy()
+        _tmp["_swap_log"] = _swap_log.values
+        _tmp["_crypto_log"] = _crypto_log.values
+        _tmp["_career"] = _career.values
+        _cohort_swap_med = _tmp.groupby("_career")["_swap_log"].transform("median")
+        _cohort_swap_std = _tmp.groupby("_career")["_swap_log"].transform("std").fillna(1.0).clip(lower=0.1)
+        _cohort_crypto_med = _tmp.groupby("_career")["_crypto_log"].transform("median")
+        _cohort_crypto_std = _tmp.groupby("_career")["_crypto_log"].transform("std").fillna(1.0).clip(lower=0.1)
+        df["swap_sum_vs_career_peer"] = ((_swap_log.values - _cohort_swap_med.values) / _cohort_swap_std.values).clip(-5, 5).astype("float32")
+        df["crypto_total_vs_career_peer"] = ((_crypto_log.values - _cohort_crypto_med.values) / _cohort_crypto_std.values).clip(-5, 5).astype("float32")
     return df
 
 
