@@ -262,7 +262,7 @@ def train_official_model() -> dict[str, Any]:
         graph_max_epochs=PRIMARY_GRAPH_MAX_EPOCHS,
         catboost_params=catboost_params,
     )
-    primary_oof, stacker_model = build_stacker_oof(primary_oof, primary_split, fold_column="primary_fold")
+    primary_oof, stacker_model = build_stacker_oof(primary_oof, primary_split, fold_column="primary_fold", use_blend=True)
     primary_oof.to_parquet(artifacts["oof"], index=False)
 
     label_frame = _label_frame(dataset)
@@ -312,6 +312,10 @@ def train_official_model() -> dict[str, Any]:
     save_graph_model(graph_final.model_state, graph_path)
     save_stacker_model(stacker_model, stacker_path)
 
+    # Extract blend weights from the stacker model (if using BlendEnsemble).
+    from official.stacking import BlendEnsemble as _BlendEnsemble
+    blend_weights = stacker_model.weights if isinstance(stacker_model, _BlendEnsemble) else None
+
     meta = {
         "model_version": f"official_transductive_{timestamp}",
         "primary_validation_protocol": {
@@ -322,6 +326,7 @@ def train_official_model() -> dict[str, Any]:
         "base_a_feature_columns": base_a_feature_columns,
         "base_b_feature_columns": base_b_feature_columns,
         "stacker_feature_columns": STACKER_FEATURE_COLUMNS,
+        "blend_weights": blend_weights,
         "fold_training_meta": fold_training_meta,
         "train_rows": int(len(train_label_free)),
         "predict_rows": int(dataset["needs_prediction"].eq(True).sum()),
@@ -343,6 +348,7 @@ def train_official_model() -> dict[str, Any]:
         "graph_model_path": str(graph_path.relative_to(paths.artifact_dir)),
         "stacker_path": str(stacker_path.relative_to(paths.artifact_dir)),
         "stacker_feature_columns": STACKER_FEATURE_COLUMNS,
+        "blend_weights": blend_weights,
         "feature_columns_base_a": base_a_feature_columns,
         "feature_columns_base_b": base_b_feature_columns,
         "feature_columns_base_d": base_a_feature_columns,

@@ -41,6 +41,11 @@ def score_official_predict() -> pd.DataFrame:
     base_e_model = None
     if "base_e_xgboost" in bundle.get("base_model_paths", {}):
         base_e_model = load_pickle(Path(bundle["base_model_paths"]["base_e_xgboost"]))
+    # If the bundle specifies blend_weights, reconstruct BlendEnsemble over the
+    # pickled stacker (BlendEnsemble is stateless — weights are stored in bundle).
+    if bundle.get("blend_weights"):
+        from official.stacking import BlendEnsemble
+        stacker_model = BlendEnsemble(bundle["blend_weights"])
 
     import numpy as _np
     base_a_probability = _np.mean(
