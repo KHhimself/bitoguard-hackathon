@@ -95,10 +95,38 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(graph_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
-    # v34: No inline features. Velocity features (v33) caused -0.004 F1 regression.
-    # Career-peer z-scores also rejected: within-base_a-decile analysis shows r<0.01
-    # — CatBoost OTS on categorical `career` already captures the cohort signal.
-    # Clean 160-feature set + better HPO is the path forward.
+    # v37: Hard-FN interaction features — targeting stealth fraudsters (account_age~384d,
+    # no multi-asset layering, low swap volume, late crypto adoption). Analysis of 602 hard
+    # FNs (base_a<0.3) vs 1038 TPs shows these interaction features have:
+    #   stealth_dormancy AUC=0.686 (anti-corr with base_a=-0.41 → captures blind spot)
+    #   activity_sparsity AUC=0.684 (anti-corr=-0.34)
+    #   round_dormant AUC=0.641 (old accounts with round-amount patterns)
+    #   late_crypto_ratio AUC=0.562 (fraction of account life before first crypto)
+    # These differ from v33 velocity features (temporal windows, regressed -0.004):
+    # these are static profile ratios encoding FATF typology "dormant account" pattern.
+    import numpy as _np
+    _age = dataset["account_age_days"].fillna(0).clip(0).astype("float32")
+    _layering = dataset["typology_multi_asset_layering"].fillna(0).clip(0, 1).astype("float32")
+    _twd_days = dataset["twd_active_days"].fillna(0).astype("float32")
+    _swap_days = dataset["swap_active_days"].fillna(0).astype("float32")
+    _dtfc = dataset["days_to_first_crypto"].fillna(0).astype("float32")
+    _round_amt = dataset["typology_round_amount"].fillna(0).astype("float32")
+    # Stealth dormancy: old account × low layering — strongest discriminator
+    dataset["stealth_dormancy"] = (
+        _np.log1p(_age) * (1.0 - _layering)
+    ).clip(0, 10).astype("float32")
+    # Activity sparsity: how many days between active days (high = mostly dormant)
+    dataset["activity_sparsity"] = (
+        _np.log1p(_age / (_twd_days + _swap_days + 1.0))
+    ).clip(0, 8).astype("float32")
+    # Round-amount dormant: round deposits by old accounts (structuring in aged accts)
+    dataset["round_dormant"] = (
+        _round_amt * (_age > 300).astype("float32")
+    ).astype("float32")
+    # Late crypto ratio: fraction of account life before first crypto (0–1)
+    dataset["late_crypto_ratio"] = (
+        _dtfc / (_age + 1.0)
+    ).clip(0, 1).astype("float32")
     return dataset
 
 

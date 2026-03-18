@@ -101,15 +101,21 @@ def train_graphsage_model(
             self.neighbor_linear_1 = nn.Linear(input_dim, hidden_dim)
             self.self_linear_2 = nn.Linear(hidden_dim, hidden_dim)
             self.neighbor_linear_2 = nn.Linear(hidden_dim, hidden_dim)
+            # v36: LayerNorm after each aggregation layer — stabilizes training on heterogeneous
+            # user graphs where node degree varies 1–849. Without normalization, high-degree
+            # hub nodes produce large activation magnitudes that destabilize gradient flow.
+            # LayerNorm normalizes per-node independently, preventing hub-induced gradient explosion.
+            self.norm_1 = nn.LayerNorm(hidden_dim)
+            self.norm_2 = nn.LayerNorm(hidden_dim)
             self.dropout = nn.Dropout(0.20)
             self.classifier = nn.Linear(hidden_dim, 1)
 
         def forward(self, x_tensor: Any, adjacency_tensor: Any) -> Any:
             neighbor_1 = torch.sparse.mm(adjacency_tensor, x_tensor)
-            hidden = F.relu(self.self_linear_1(x_tensor) + self.neighbor_linear_1(neighbor_1))
+            hidden = self.norm_1(F.relu(self.self_linear_1(x_tensor) + self.neighbor_linear_1(neighbor_1)))
             hidden = self.dropout(hidden)
             neighbor_2 = torch.sparse.mm(adjacency_tensor, hidden)
-            hidden = F.relu(self.self_linear_2(hidden) + self.neighbor_linear_2(neighbor_2))
+            hidden = self.norm_2(F.relu(self.self_linear_2(hidden) + self.neighbor_linear_2(neighbor_2)))
             hidden = self.dropout(hidden)
             return self.classifier(hidden).squeeze(-1)
 
@@ -237,15 +243,17 @@ def predict_graph_model(graph: TransductiveGraph, model_state: dict[str, Any]) -
             self.neighbor_linear_1 = nn.Linear(input_dim, hidden_dim)
             self.self_linear_2 = nn.Linear(hidden_dim, hidden_dim)
             self.neighbor_linear_2 = nn.Linear(hidden_dim, hidden_dim)
+            self.norm_1 = nn.LayerNorm(hidden_dim)
+            self.norm_2 = nn.LayerNorm(hidden_dim)
             self.dropout = nn.Dropout(0.20)
             self.classifier = nn.Linear(hidden_dim, 1)
 
         def forward(self, x_tensor: Any, adjacency_tensor: Any) -> Any:
             neighbor_1 = torch.sparse.mm(adjacency_tensor, x_tensor)
-            hidden = F.relu(self.self_linear_1(x_tensor) + self.neighbor_linear_1(neighbor_1))
+            hidden = self.norm_1(F.relu(self.self_linear_1(x_tensor) + self.neighbor_linear_1(neighbor_1)))
             hidden = self.dropout(hidden)
             neighbor_2 = torch.sparse.mm(adjacency_tensor, hidden)
-            hidden = F.relu(self.self_linear_2(hidden) + self.neighbor_linear_2(neighbor_2))
+            hidden = self.norm_2(F.relu(self.self_linear_2(hidden) + self.neighbor_linear_2(neighbor_2)))
             hidden = self.dropout(hidden)
             return self.classifier(hidden).squeeze(-1)
 

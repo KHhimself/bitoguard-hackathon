@@ -68,10 +68,10 @@ def score_official_predict() -> pd.DataFrame:
     # Add scoring users to base_probs (they override labeled users if overlapping)
     for _uid, _p in zip(scoring_label_free["user_id"].astype(int), base_a_probability):
         _cs_base_probs[int(_uid)] = float(_p)
-    _cs_train_labels: dict[int, float] = {
-        int(r["user_id"]): float(r["status"])
-        for _, r in full_label_frame.iterrows()
-    }
+    _cs_train_labels: dict[int, float] = dict(zip(
+        full_label_frame["user_id"].astype(int),
+        full_label_frame["status"].astype(float),
+    ))
     _cs_result = correct_and_smooth(
         graph, _cs_train_labels, _cs_base_probs,
         alpha_correct=0.5, alpha_smooth=0.5,
