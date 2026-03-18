@@ -62,6 +62,20 @@ STACKER_FEATURE_COLUMNS = [
     # Reserved for future nonlinear stacker experiments.
     "base_d_x_cs",
     "base_e_x_cs",
+    # v43: Multi-source confirmation features.
+    # base_a_x_e: CatBoost × XGBoost label-free cross-model agreement.
+    #   Both trained on same features but with fundamentally different regularization.
+    #   Product amplifies users flagged by two independent algorithms simultaneously.
+    # base_cs_x_anomaly: C&S probability × anomaly score.
+    #   Graph-propagated fraud signal × statistical outlier detection.
+    #   Targets users who are BOTH graph-suspicious AND statistically anomalous.
+    #   Added as blend candidate: product AP expected > individual AP of anomaly alone.
+    # base_b_x_cs: Transductive CatBoost × C&S — two independent graph-informed signals.
+    #   base_b uses graph structure as features; C&S propagates scores on the graph.
+    #   Agreement between these two orthogonal graph methods → very high confidence.
+    "base_a_x_e",
+    "base_cs_x_anomaly",
+    "base_b_x_cs",
 ]
 
 # Columns eligible for the AP-weighted blend (non-rule, non-meta columns).
@@ -79,6 +93,12 @@ _BLEND_CANDIDATE_COLUMNS = [
     # 0.05→0.10, losing fine-grained 5% allocations for base_a and base_d.
     # It remains in STACKER_FEATURE_COLUMNS for future non-linear stacker use
     # and is computed in _add_base_meta_features.
+    # v43: base_cs_x_anomaly as blend candidate — graph + anomaly dual confirmation.
+    # Expected AP > anomaly alone (0.08-0.15) and > C&S alone (0.295) is unlikely,
+    # but product AP > 0.08 threshold should be met; top-5 selection filters winners.
+    # If AP of this product > anomaly_score AP, it replaces anomaly with a more
+    # precise signal: only users who are BOTH graph-suspicious AND statistically anomalous.
+    "base_cs_x_anomaly",
 ]
 
 # Minimum AP threshold to include a model in the blend.
@@ -151,6 +171,20 @@ def _add_base_meta_features(frame: pd.DataFrame) -> pd.DataFrame:
     e = pd.to_numeric(frame.get("base_e_probability", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
     frame["base_d_x_cs"] = (d * cs).astype(np.float32)
     frame["base_e_x_cs"] = (e * cs).astype(np.float32)
+    # v43: Multi-source confirmation features.
+    # base_a_x_e: CatBoost × XGBoost — two label-free models with fundamentally
+    #   different regularization (L2-leaf vs column-block). Product amplifies users
+    #   flagged simultaneously by both, reducing single-model FP noise.
+    b = pd.to_numeric(frame.get("base_b_probability", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+    frame["base_a_x_e"] = (a * e).astype(np.float32)
+    # base_cs_x_anomaly: C&S × anomaly — graph-propagated fraud signal × statistical
+    #   outlier detection. Users who are BOTH graph-suspicious AND statistically anomalous
+    #   are very likely fraudsters. Expected AP > anomaly alone; eligible for blend.
+    frame["base_cs_x_anomaly"] = (cs * anomaly).astype(np.float32)
+    # base_b_x_cs: Transductive CatBoost × C&S — two independent graph-informed signals.
+    #   base_b uses graph structure as features; C&S propagates scores on the graph.
+    #   Their product provides strong confirmation for graph-connected fraud.
+    frame["base_b_x_cs"] = (b * cs).astype(np.float32)
     return frame
 
 
