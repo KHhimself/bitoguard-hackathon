@@ -54,10 +54,15 @@ def _normalized_adjacency(graph: TransductiveGraph) -> sparse.csr_matrix:
     return inverse @ adjacency
 
 
-def _propagation_scores(graph: TransductiveGraph, seed_users: set[int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _propagation_scores(
+    graph: TransductiveGraph, seed_users: set[int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     user_count = len(graph.user_ids)
     if user_count == 0 or not seed_users:
-        return np.zeros(user_count), np.zeros(user_count), np.zeros(user_count)
+        return (
+            np.zeros(user_count), np.zeros(user_count),
+            np.zeros(user_count), np.zeros(user_count), np.zeros(user_count),
+        )
     adjacency = _normalized_adjacency(graph)
     seed_vector = np.zeros(user_count, dtype=float)
     for user_id in seed_users:
@@ -67,11 +72,31 @@ def _propagation_scores(graph: TransductiveGraph, seed_users: set[int]) -> tuple
         seed_vector = seed_vector / seed_vector.sum()
     one_hop = adjacency @ seed_vector
     two_hop = adjacency @ one_hop
-    alpha = 0.20
-    ppr = seed_vector.copy()
+    # v45: Three PPR scales capture different propagation ranges for fraud ring detection.
+    # alpha=0.20 — balanced local/global (existing standard)
+    # alpha=0.05 — long-range: fraud rings connected through 3-5 hops (low restart rate
+    #              means more mass diffuses far from seeds before returning)
+    # alpha=0.50 — very local: emphasises direct 1-hop neighbourhood (high restart rate
+    #              keeps mass near seeds, capturing tight fraud clusters)
+    alpha_mid = 0.20
+    ppr_mid = seed_vector.copy()
     for _ in range(20):
-        ppr = alpha * seed_vector + (1.0 - alpha) * (adjacency @ ppr)
-    return np.asarray(one_hop).ravel(), np.asarray(two_hop).ravel(), np.asarray(ppr).ravel()
+        ppr_mid = alpha_mid * seed_vector + (1.0 - alpha_mid) * (adjacency @ ppr_mid)
+
+    alpha_long = 0.05  # long-range diffusion; more iterations to converge
+    ppr_long = seed_vector.copy()
+    for _ in range(30):
+        ppr_long = alpha_long * seed_vector + (1.0 - alpha_long) * (adjacency @ ppr_long)
+
+    alpha_local = 0.50  # very local
+    ppr_local = seed_vector.copy()
+    for _ in range(15):
+        ppr_local = alpha_local * seed_vector + (1.0 - alpha_local) * (adjacency @ ppr_local)
+
+    return (
+        np.asarray(one_hop).ravel(), np.asarray(two_hop).ravel(),
+        np.asarray(ppr_mid).ravel(), np.asarray(ppr_long).ravel(), np.asarray(ppr_local).ravel(),
+    )
 
 
 def _edge_type_counts(graph: TransductiveGraph, positive_seed_users: set[int]) -> pd.DataFrame:
@@ -110,6 +135,7 @@ def _entity_seed_aggregates(
                 f"{prefix}_seed_positive_entity_sum",
                 f"{prefix}_seed_positive_entity_max",
                 f"{prefix}_seed_positive_ratio_mean",
+                f"{prefix}_seed_positive_ratio_max",
                 f"{prefix}_seed_labeled_ratio_mean",
             ]
         )
@@ -132,6 +158,9 @@ def _entity_seed_aggregates(
         seed_positive_entity_sum=("positive_seed_count", "sum"),
         seed_positive_entity_max=("positive_seed_count", "max"),
         seed_positive_ratio_mean=("positive_seed_ratio", "mean"),
+        # v45: Max contamination ratio — if ANY shared entity is highly contaminated,
+        # that is a strong fraud signal regardless of mean across all entities.
+        seed_positive_ratio_max=("positive_seed_ratio", "max"),
         seed_labeled_ratio_mean=("labeled_seed_ratio", "mean"),
     ).reset_index()
     grouped = grouped.rename(
@@ -139,6 +168,7 @@ def _entity_seed_aggregates(
             "seed_positive_entity_sum": f"{prefix}_seed_positive_entity_sum",
             "seed_positive_entity_max": f"{prefix}_seed_positive_entity_max",
             "seed_positive_ratio_mean": f"{prefix}_seed_positive_ratio_mean",
+            "seed_positive_ratio_max": f"{prefix}_seed_positive_ratio_max",
             "seed_labeled_ratio_mean": f"{prefix}_seed_labeled_ratio_mean",
         }
     )
@@ -201,7 +231,7 @@ def build_transductive_feature_frame(
     ip_seed_stats = _entity_seed_aggregates(graph.ip_edges, positive_seed_users, labeled_seed_users, "ip")
     component_stats = _component_seed_stats(graph, train_label_frame)
 
-    one_hop, two_hop, ppr = _propagation_scores(graph, positive_seed_users)
+    one_hop, two_hop, ppr, ppr_long, ppr_local = _propagation_scores(graph, positive_seed_users)
     distances = _multi_source_distance_map(graph, positive_seed_users)
     propagation = pd.DataFrame(
         {
@@ -209,6 +239,10 @@ def build_transductive_feature_frame(
             "positive_seed_weight_1hop": one_hop,
             "positive_seed_weight_2hop": two_hop,
             "positive_seed_ppr": ppr,
+            # v45: Long-range PPR (alpha=0.05) captures fraud rings 3-5 hops away.
+            "positive_seed_ppr_long": ppr_long,
+            # v45: Local PPR (alpha=0.50) emphasises tight 1-hop fraud clusters.
+            "positive_seed_ppr_local": ppr_local,
             "nearest_positive_seed_distance": [distances.get(user_id, -1) for user_id in graph.user_ids],
         }
     )

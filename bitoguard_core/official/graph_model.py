@@ -94,16 +94,6 @@ def train_graphsage_model(
     x = _feature_tensor(graph, torch, feature_columns)
     adjacency = _normalized_adjacency_tensor(graph, torch)
 
-    # Compute positive prior from training labels for bias initialization.
-    # Standard practice for class-imbalanced classification: initialize the output
-    # bias to log(pi/(1-pi)) so sigmoid(bias)=pi (true positive rate, ~0.03).
-    # Without this, default bias=0 → sigmoid(0)=0.5, forcing gradients to push ALL
-    # users toward 0. With 30:1 imbalance, this gradient flood dominates and the
-    # model collapses to predicting a constant ~0.5 or overshoots to constant near 0.
-    _label_vals = labels[train_mask]
-    _pi = max(0.001, min(0.999, float((_label_vals == 1.0).float().mean().item())))
-    _prior_logit = float(np.log(_pi / (1.0 - _pi)))  # ≈ -3.48 for pi=0.03
-
     class UserGraphSAGE(nn.Module):
         def __init__(self, input_dim: int, hidden_dim: int, prior_logit: float) -> None:
             super().__init__()
@@ -141,7 +131,7 @@ def train_graphsage_model(
             hidden = self.dropout(hidden)
             return self.classifier(hidden).squeeze(-1)
 
-    model = UserGraphSAGE(x.size(1), hidden_dim, _prior_logit)
+    # Build labels and train_mask BEFORE creating model (prior_logit needs them).
     labels = torch.full((len(graph.user_ids),), -1.0, dtype=torch.float32)
     label_frame = label_frame.copy()
     label_frame["user_id"] = pd.to_numeric(label_frame["user_id"], errors="coerce").astype("Int64")
@@ -156,6 +146,18 @@ def train_graphsage_model(
     for user_id in train_user_ids:
         if user_id in graph.user_index:
             train_mask[graph.user_index[user_id]] = True
+
+    # Compute positive prior from training labels for bias initialization.
+    # Standard practice for class-imbalanced classification: initialize the output
+    # bias to log(pi/(1-pi)) so sigmoid(bias)=pi (true positive rate, ~0.03).
+    # Without this, default bias=0 → sigmoid(0)=0.5, forcing gradients to push ALL
+    # users toward 0. With 30:1 imbalance, this gradient flood dominates and the
+    # model collapses to predicting a constant ~0.5 or overshoots to constant near 0.
+    _label_vals = labels[train_mask]
+    _pi = max(0.001, min(0.999, float((_label_vals == 1.0).float().mean().item())))
+    _prior_logit = float(np.log(_pi / (1.0 - _pi)))  # ≈ -3.48 for pi=0.03
+
+    model = UserGraphSAGE(x.size(1), hidden_dim, _prior_logit)
     valid_mask = torch.zeros(len(graph.user_ids), dtype=torch.bool)
     for user_id in valid_user_ids or set():
         if user_id in graph.user_index:
@@ -300,8 +302,12 @@ def predict_graph_model(graph: TransductiveGraph, model_state: dict[str, Any]) -
     adjacency = _normalized_adjacency_tensor(graph, torch)
 
     class UserGraphSAGE(nn.Module):
+        # v45: Mirror train architecture exactly — includes v43 input_bn and v36 LayerNorm.
+        # Old saved models (pre-v43) will load with strict=False; missing BatchNorm
+        # weights initialise to identity (weight=1, bias=0), which is neutral.
         def __init__(self, input_dim: int, hidden_dim: int) -> None:
             super().__init__()
+            self.input_bn = nn.BatchNorm1d(input_dim)
             self.self_linear_1 = nn.Linear(input_dim, hidden_dim)
             self.neighbor_linear_1 = nn.Linear(input_dim, hidden_dim)
             self.self_linear_2 = nn.Linear(hidden_dim, hidden_dim)
@@ -312,8 +318,9 @@ def predict_graph_model(graph: TransductiveGraph, model_state: dict[str, Any]) -
             self.classifier = nn.Linear(hidden_dim, 1)
 
         def forward(self, x_tensor: Any, adjacency_tensor: Any) -> Any:
-            neighbor_1 = torch.sparse.mm(adjacency_tensor, x_tensor)
-            hidden = self.norm_1(F.relu(self.self_linear_1(x_tensor) + self.neighbor_linear_1(neighbor_1)))
+            x_normed = self.input_bn(x_tensor)
+            neighbor_1 = torch.sparse.mm(adjacency_tensor, x_normed)
+            hidden = self.norm_1(F.relu(self.self_linear_1(x_normed) + self.neighbor_linear_1(neighbor_1)))
             hidden = self.dropout(hidden)
             neighbor_2 = torch.sparse.mm(adjacency_tensor, hidden)
             hidden = self.norm_2(F.relu(self.self_linear_2(hidden) + self.neighbor_linear_2(neighbor_2)))
@@ -321,7 +328,11 @@ def predict_graph_model(graph: TransductiveGraph, model_state: dict[str, Any]) -
             return self.classifier(hidden).squeeze(-1)
 
     model = UserGraphSAGE(x.size(1), int(metadata["hidden_dim"]))
-    model.load_state_dict(model_state["state_dict"])
+    # strict=False for backward compatibility: old models (pre-v43) lack input_bn/norm
+    # weights; PyTorch initialises them to identity so inference degrades gracefully.
+    missing, unexpected = model.load_state_dict(model_state["state_dict"], strict=False)
+    if unexpected:
+        raise RuntimeError(f"Unexpected keys in GNN state_dict: {unexpected}")
     model.eval()
     with torch.no_grad():
         probabilities = torch.sigmoid(model(x, adjacency)).detach().cpu().numpy()

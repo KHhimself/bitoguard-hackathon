@@ -172,8 +172,17 @@ def run_hpo_study(
     n_trials: int = 30,
     timeout: int | None = None,
     seed: int = RANDOM_SEED,
+    l2_min: float = 1.0,
+    l2_max: float = 60.0,
+    output_filename: str = "hpo_best_params.json",
 ) -> dict[str, Any]:
     """Run Optuna HPO study for CatBoost Base A hyperparameters.
+
+    Args:
+        l2_min: Lower bound for l2_leaf_reg search space (default 1.0).
+        l2_max: Upper bound for l2_leaf_reg search space (default 60.0).
+            Set to 400+ for HPO v2 to explore higher regularization.
+        output_filename: Name of the output JSON file saved to feature_dir.
 
     Returns dict with best_params, best_f1, best_threshold, and study summary.
     """
@@ -208,8 +217,8 @@ def run_hpo_study(
         params = {
             "depth": trial.suggest_int("depth", 4, 10),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-            # v34: extend l2 upper bound (best was 25.7 near old limit of 30)
-            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 60.0, log=True),
+            # v45: l2 range is parameterised — v1 uses [1, 60], v2 uses [50, 400].
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", l2_min, l2_max, log=True),
             "random_strength": trial.suggest_float("random_strength", 0.1, 10.0, log=True),
             # v34: extend bagging upper bound (best was 3.89 near old limit of 5)
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 8.0),
@@ -272,7 +281,7 @@ def run_hpo_study(
             "trial_results": sorted(trial_results, key=lambda x: -x["f1"]),
         }
         try:
-            save_json(_interim, load_official_paths().feature_dir / "hpo_best_params.json")
+            save_json(_interim, load_official_paths().feature_dir / output_filename)
         except Exception:
             pass
         return f1
@@ -311,7 +320,7 @@ def run_hpo_study(
         "n_trials": len(study.trials),
         "trial_results": sorted(trial_results, key=lambda x: -x["f1"]),
     }
-    output_path = paths.feature_dir / "hpo_best_params.json"
+    output_path = paths.feature_dir / output_filename
     save_json(output, output_path)
     logger.info(f"Best F1={best_f1:.4f} at trial {best.number}")
     logger.info(f"Best params: {json.dumps(best_params, indent=2)}")
@@ -334,6 +343,12 @@ def main() -> None:
     parser.add_argument("--n-trials", type=int, default=30, help="Number of Optuna trials")
     parser.add_argument("--timeout", type=int, default=None, help="Timeout in seconds")
     parser.add_argument("--seed", type=int, default=RANDOM_SEED, help="Random seed")
+    # v45: Extended search space for HPO v2 — pass --l2-min 50 --l2-max 400
+    parser.add_argument("--l2-min", type=float, default=1.0, help="Lower bound for l2_leaf_reg (default 1.0)")
+    parser.add_argument("--l2-max", type=float, default=60.0, help="Upper bound for l2_leaf_reg (default 60.0). "
+                        "For HPO v2 use 400.0 to explore beyond v1 boundary.")
+    parser.add_argument("--output", type=str, default="hpo_best_params.json",
+                        help="Output filename (saved to feature_dir). Default: hpo_best_params.json")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -342,7 +357,10 @@ def main() -> None:
     )
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    result = run_hpo_study(n_trials=args.n_trials, timeout=args.timeout, seed=args.seed)
+    result = run_hpo_study(
+        n_trials=args.n_trials, timeout=args.timeout, seed=args.seed,
+        l2_min=args.l2_min, l2_max=args.l2_max, output_filename=args.output,
+    )
     print(f"\n=== HPO Complete ===")
     print(f"Best F1: {result['best_f1']:.4f}")
     print(f"Best params: {json.dumps(result['best_params'], indent=2)}")
