@@ -14,6 +14,7 @@ from official.features import build_official_features
 from official.graph_dataset import TransductiveGraph, build_transductive_graph
 from official.graph_features import build_official_graph_features
 from official.graph_model import save_graph_model, train_graphsage_model
+from official.correct_and_smooth import correct_and_smooth
 from official.modeling import fit_catboost, fit_lgbm
 from official.modeling_xgb import fit_xgboost
 from official.rules import evaluate_official_rules
@@ -211,9 +212,39 @@ def run_transductive_oof_pipeline(
             hidden_dim=64,
         )
 
+        # Correct-and-Smooth (C&S): graph-based post-processing on Base A OOF probs.
+        # Uses training-fold labels only (no label leakage from val fold).
+        # For train fold: predict with the Base A models (overfit but OK — residuals absorb error).
+        # For val fold: use unbiased OOF predictions.
+        _train_a_probs = np.mean(
+            [m.predict_proba(train_label_free[base_a_feature_columns])[:, 1] for m in _base_a_models],
+            axis=0,
+        )
+        _val_a_probs = np.asarray(base_a_fit.validation_probabilities, dtype=float)
+        _cs_base_probs: dict[int, float] = {}
+        for _uid, _prob in zip(train_label_free["user_id"].astype(int), _train_a_probs):
+            _cs_base_probs[int(_uid)] = float(_prob)
+        for _uid, _prob in zip(valid_label_free["user_id"].astype(int), _val_a_probs):
+            _cs_base_probs[int(_uid)] = float(_prob)
+        _cs_train_labels: dict[int, float] = {
+            int(r["user_id"]): float(r["status"])
+            for _, r in fold_train_labels.iterrows()
+        }
+        _cs_result = correct_and_smooth(
+            graph, _cs_train_labels, _cs_base_probs,
+            alpha_correct=0.5, alpha_smooth=0.5,
+            n_correct_iter=50, n_smooth_iter=50,
+        )
+        _val_ids = valid_label_free["user_id"].astype(int).tolist()
+        _cs_val_probs = np.array(
+            [_cs_result.get(int(_uid), float(_p)) for _uid, _p in zip(_val_ids, _val_a_probs)],
+            dtype=float,
+        )
+
         fold_frame = valid_label_free[["user_id", "status"]].copy()
         fold_frame[fold_column] = fold_id
-        fold_frame["base_a_probability"] = np.asarray(base_a_fit.validation_probabilities, dtype=float)
+        fold_frame["base_a_probability"] = _val_a_probs
+        fold_frame["base_c_s_probability"] = _cs_val_probs
         fold_frame["base_b_probability"] = np.asarray(base_b_fit.validation_probabilities, dtype=float)
         fold_frame["base_c_probability"] = np.asarray(graph_fit.validation_probabilities, dtype=float)
         fold_frame["base_d_probability"] = np.asarray(base_d_fit.validation_probabilities, dtype=float)

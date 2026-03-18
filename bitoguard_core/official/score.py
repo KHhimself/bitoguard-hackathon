@@ -7,6 +7,7 @@ import pandas as pd
 
 from official.bundle import load_selected_bundle
 from official.common import encode_frame, load_clean_table, load_official_paths, load_pickle
+from official.correct_and_smooth import correct_and_smooth
 from official.graph_dataset import build_transductive_graph
 from official.graph_model import load_graph_model, predict_graph_model
 from official.stacking import STACKER_FEATURE_COLUMNS
@@ -48,14 +49,45 @@ def score_official_predict() -> pd.DataFrame:
         stacker_model = BlendEnsemble(bundle["blend_weights"])
 
     import numpy as _np
+    # Base A: predict on scoring users only (for stacker input)
     base_a_probability = _np.mean(
         [m.predict_proba(scoring_label_free[bundle["feature_columns_base_a"]])[:, 1] for m in base_a_models],
         axis=0,
     )
+    # C&S: apply graph correction to Base A probabilities.
+    # Uses ALL labeled users as training seeds (no leakage — scoring users have no labels).
+    # All labeled users' Base A predictions are computed once here for C&S propagation.
+    _all_labeled_ids = label_free_frame["user_id"].astype(int).tolist()
+    _all_a_probs = _np.mean(
+        [m.predict_proba(label_free_frame[bundle["feature_columns_base_a"]])[:, 1] for m in base_a_models],
+        axis=0,
+    )
+    _cs_base_probs: dict[int, float] = {
+        int(_uid): float(_p) for _uid, _p in zip(_all_labeled_ids, _all_a_probs)
+    }
+    # Add scoring users to base_probs (they override labeled users if overlapping)
+    for _uid, _p in zip(scoring_label_free["user_id"].astype(int), base_a_probability):
+        _cs_base_probs[int(_uid)] = float(_p)
+    _cs_train_labels: dict[int, float] = {
+        int(r["user_id"]): float(r["status"])
+        for _, r in full_label_frame.iterrows()
+    }
+    _cs_result = correct_and_smooth(
+        graph, _cs_train_labels, _cs_base_probs,
+        alpha_correct=0.5, alpha_smooth=0.5,
+        n_correct_iter=50, n_smooth_iter=50,
+    )
+    _scoring_ids = scoring_label_free["user_id"].astype(int).tolist()
+    base_c_s_probability = _np.array(
+        [_cs_result.get(int(_uid), float(_p)) for _uid, _p in zip(_scoring_ids, base_a_probability)],
+        dtype=float,
+    )
+
     base_b_probability = base_b_model.predict_proba(scoring_transductive[bundle["feature_columns_base_b"]])[:, 1]
     graph_probability_frame = predict_graph_model(graph, graph_model_state)
     scoring = scoring_label_free.merge(graph_probability_frame, on="user_id", how="left")
     scoring["base_a_probability"] = base_a_probability
+    scoring["base_c_s_probability"] = base_c_s_probability
     scoring["base_b_probability"] = base_b_probability
     scoring["base_c_probability"] = scoring["graph_probability"].fillna(0.0)
     if base_d_model is not None:

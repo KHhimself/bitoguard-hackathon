@@ -140,12 +140,17 @@ def fit_catboost(
     _bt = hp.get("bagging_temperature", 1.0)
     _bc = hp.get("border_count", 254)
     _mdl = hp.get("min_data_in_leaf", 1)
+    # iterations/early_stopping_rounds: match HPO budget (HPO uses 1500/100).
+    # Without this, HPO params tuned at 1500 iter underperform at default 1000.
+    _iters = hp.get("iterations", 1500)
+    _esr = hp.get("early_stopping_rounds", 100)
     model = CatBoostClassifier(
         loss_function="Logloss",
         eval_metric="Logloss",
         class_weights=class_weights,
         random_seed=random_seed,
         verbose=False,
+        iterations=_iters,
         depth=_depth,
         learning_rate=_lr,
         l2_leaf_reg=_l2,
@@ -161,7 +166,7 @@ def fit_catboost(
         try:
             model.fit(train_frame[feature_columns], y_train, cat_features=cat_features,
                       eval_set=(valid_frame[feature_columns], y_valid),
-                      use_best_model=True, early_stopping_rounds=100)
+                      use_best_model=True, early_stopping_rounds=_esr)
         except Exception:
             if runtime_params.get("task_type") != "GPU":
                 raise
@@ -169,6 +174,7 @@ def fit_catboost(
                 loss_function="Logloss", eval_metric="Logloss",
                 class_weights=class_weights,
                 random_seed=random_seed, verbose=False,
+                iterations=_iters,
                 depth=_depth, learning_rate=_lr,
                 l2_leaf_reg=_l2, random_strength=_rs,
                 bagging_temperature=_bt, border_count=_bc,
@@ -177,7 +183,7 @@ def fit_catboost(
             )
             model.fit(train_frame[feature_columns], y_train, cat_features=cat_features,
                       eval_set=(valid_frame[feature_columns], y_valid),
-                      use_best_model=True, early_stopping_rounds=100)
+                      use_best_model=True, early_stopping_rounds=_esr)
         validation_probabilities = model.predict_proba(valid_frame[feature_columns])[:, 1].tolist()
     else:
         try:
@@ -189,6 +195,7 @@ def fit_catboost(
                 loss_function="Logloss", eval_metric="Logloss",
                 class_weights=class_weights,
                 random_seed=random_seed, verbose=False,
+                iterations=_iters,
                 depth=_depth, learning_rate=_lr,
                 l2_leaf_reg=_l2, random_strength=_rs,
                 bagging_temperature=_bt, border_count=_bc,

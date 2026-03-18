@@ -29,6 +29,7 @@ class IdentityCalibrator:
 # max/std meta-features for model-consensus signal.
 STACKER_FEATURE_COLUMNS = [
     "base_a_probability",
+    "base_c_s_probability",  # v35: Correct-and-Smooth post-processing of Base A (graph-corrected)
     "base_b_probability",
     "base_c_probability",
     "base_d_probability",
@@ -52,6 +53,7 @@ STACKER_FEATURE_COLUMNS = [
 # Only probability-scale columns are used for blend weighting.
 _BLEND_CANDIDATE_COLUMNS = [
     "base_a_probability",
+    "base_c_s_probability",  # v35: C&S — AP > 0.08 expected (offline test: AP=0.2915)
     "base_b_probability",
     "base_c_probability",
     "base_d_probability",
@@ -93,8 +95,8 @@ class BlendEnsemble:
         return np.column_stack([1.0 - blend, blend])
 
 _BASE_PROB_COLUMNS = [
-    "base_a_probability", "base_b_probability", "base_c_probability",
-    "base_d_probability", "base_e_probability",
+    "base_a_probability", "base_c_s_probability", "base_b_probability",
+    "base_c_probability", "base_d_probability", "base_e_probability",
 ]
 
 
