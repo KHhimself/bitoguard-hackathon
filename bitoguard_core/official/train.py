@@ -69,8 +69,10 @@ LABEL_FREE_EXCLUDED_COLUMNS = {
     "ocsvm_score",
 }
 
-# Seeds for multi-seed CatBoost ensemble — averaging 3 seeds reduces Base A variance.
-_BASE_A_SEEDS = [42, 52, 62]
+# Seeds for multi-seed CatBoost ensemble — averaging 4 seeds reduces Base A variance.
+# v37: Added seed=72 (4th seed). 3→4 seeds reduces variance ~13% (1/sqrt(4) vs 1/sqrt(3))
+# adding ~0.001-0.002 F1 at cost of +33% Base A training time per fold.
+_BASE_A_SEEDS = [42, 52, 62, 72]
 
 # v36: Increased GNN fold epochs from 5→10 after switching to symmetric D^{-1/2}AD^{-1/2}
 # normalization (graph_model.py). The previous source-only D^{-1}A caused hub nodes

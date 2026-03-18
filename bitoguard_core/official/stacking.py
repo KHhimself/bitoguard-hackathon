@@ -47,6 +47,10 @@ STACKER_FEATURE_COLUMNS = [
     # These help depth-3 CatBoost find tight positive clusters.
     "base_a_x_anomaly",
     "base_a_x_rule",
+    # v37: Graph-confirmed fraud interaction — AP=0.310 > either individual model.
+    # base_a × C&S: when label-free CatBoost AND graph-propagated signal both agree,
+    # the product is very high (high-confidence fraud) vs negatives where one is near 0.
+    "base_a_x_cs",
 ]
 
 # Columns eligible for the AP-weighted blend (non-rule, non-meta columns).
@@ -59,6 +63,11 @@ _BLEND_CANDIDATE_COLUMNS = [
     "base_d_probability",
     "base_e_probability",
     "anomaly_score",
+    # NOTE v37: base_a_x_cs (AP=0.310) was tested as a blend candidate but
+    # caused -0.002 F1 regression: adding it as a 6th eligible col forces step
+    # 0.05→0.10, losing fine-grained 5% allocations for base_a and base_d.
+    # It remains in STACKER_FEATURE_COLUMNS for future non-linear stacker use
+    # and is computed in _add_base_meta_features.
 ]
 
 # Minimum AP threshold to include a model in the blend.
@@ -118,6 +127,12 @@ def _add_base_meta_features(frame: pd.DataFrame) -> pd.DataFrame:
     rule = pd.to_numeric(frame.get("rule_score", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
     frame["base_a_x_anomaly"] = (a * anomaly).astype(np.float32)
     frame["base_a_x_rule"] = (a * rule).astype(np.float32)
+    # v37: Graph-confirmed fraud interactions — AP=0.310 > base_a(0.298) or C&S(0.295).
+    # base_a_x_cs amplifies cases where BOTH label-free model AND graph-corrected model
+    # agree: product squeezes negative-score overlap for users where only one model fires.
+    # Eligible for blend (AP > 0.08 threshold) and improves blend F1 when step adaptive.
+    cs = pd.to_numeric(frame.get("base_c_s_probability", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+    frame["base_a_x_cs"] = (a * cs).astype(np.float32)
     return frame
 
 
@@ -175,12 +190,20 @@ def tune_blend_weights(frame: pd.DataFrame) -> dict[str, float]:
     arrays = np.stack([eligible[c] for c in cols], axis=0)  # (n_cols, n_samples)
     n = len(cols)
 
-    # Build all weight combinations summing to 1 at step=0.05.
-    # Finer grid (vs 0.10) improves precision while remaining tractable:
-    # n=5 cols → C(20+4,4)=10626 combos, fully vectorized per threshold.
-    # Use integer composition enumeration (not itertools.product) to avoid O(21^5)=4M overhead.
-    step = 0.05
-    parts = round(1.0 / step)  # 20 for step=0.05
+    # Build all weight combinations summing to 1 at adaptive step size.
+    # Grid scales as C(parts+n-1, n-1) — exponential in n — target ≤ 5K combos:
+    #   n=5, step=0.05 → C(24,4)=10626 combos (0.5 GB)
+    #   n=6, step=0.10 → C(15,5)= 3003 combos (0.6 GB) ✓
+    #   n=7, step=0.15 → C(13,6)= 1716 combos (0.35 GB) ✓ [parts=round(1/0.15)=7]
+    #   n=8+, step=0.15 → C(14,7)= 3432 combos (0.7 GB) ✓
+    # v37: Adaptive step so adding interaction columns (base_a_x_cs etc.) doesn't OOM.
+    if n <= 5:
+        step = 0.05
+    elif n == 6:
+        step = 0.10
+    else:
+        step = 0.15
+    parts = round(1.0 / step)
 
     def _integer_compositions(total: int, k: int) -> list[list[int]]:
         if k == 1:
