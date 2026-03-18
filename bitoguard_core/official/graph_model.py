@@ -94,9 +94,24 @@ def train_graphsage_model(
     x = _feature_tensor(graph, torch, feature_columns)
     adjacency = _normalized_adjacency_tensor(graph, torch)
 
+    # Compute positive prior from training labels for bias initialization.
+    # Standard practice for class-imbalanced classification: initialize the output
+    # bias to log(pi/(1-pi)) so sigmoid(bias)=pi (true positive rate, ~0.03).
+    # Without this, default bias=0 → sigmoid(0)=0.5, forcing gradients to push ALL
+    # users toward 0. With 30:1 imbalance, this gradient flood dominates and the
+    # model collapses to predicting a constant ~0.5 or overshoots to constant near 0.
+    _label_vals = labels[train_mask]
+    _pi = max(0.001, min(0.999, float((_label_vals == 1.0).float().mean().item())))
+    _prior_logit = float(np.log(_pi / (1.0 - _pi)))  # ≈ -3.48 for pi=0.03
+
     class UserGraphSAGE(nn.Module):
-        def __init__(self, input_dim: int, hidden_dim: int) -> None:
+        def __init__(self, input_dim: int, hidden_dim: int, prior_logit: float) -> None:
             super().__init__()
+            # v43: Input feature BatchNorm — normalizes ~150 raw features (different scales:
+            # account_age_days=0-3650, crypto_txn_count=0-1000+, etc.) to prevent large-scale
+            # features dominating gradient flow through the neighborhood aggregation step.
+            # BatchNorm over all N nodes gives stable per-feature statistics across the graph.
+            self.input_bn = nn.BatchNorm1d(input_dim)
             self.self_linear_1 = nn.Linear(input_dim, hidden_dim)
             self.neighbor_linear_1 = nn.Linear(input_dim, hidden_dim)
             self.self_linear_2 = nn.Linear(hidden_dim, hidden_dim)
@@ -109,17 +124,24 @@ def train_graphsage_model(
             self.norm_2 = nn.LayerNorm(hidden_dim)
             self.dropout = nn.Dropout(0.20)
             self.classifier = nn.Linear(hidden_dim, 1)
+            # v43: Initialize classifier bias to log(pi/(1-pi)) so the model starts at the
+            # true positive rate (~0.03) rather than 0.5. This prevents the class-imbalance
+            # gradient flood that collapses GNN probabilities to a constant.
+            with torch.no_grad():
+                self.classifier.bias.fill_(prior_logit)
 
         def forward(self, x_tensor: Any, adjacency_tensor: Any) -> Any:
-            neighbor_1 = torch.sparse.mm(adjacency_tensor, x_tensor)
-            hidden = self.norm_1(F.relu(self.self_linear_1(x_tensor) + self.neighbor_linear_1(neighbor_1)))
+            # Normalize input features before aggregation.
+            x_normed = self.input_bn(x_tensor)
+            neighbor_1 = torch.sparse.mm(adjacency_tensor, x_normed)
+            hidden = self.norm_1(F.relu(self.self_linear_1(x_normed) + self.neighbor_linear_1(neighbor_1)))
             hidden = self.dropout(hidden)
             neighbor_2 = torch.sparse.mm(adjacency_tensor, hidden)
             hidden = self.norm_2(F.relu(self.self_linear_2(hidden) + self.neighbor_linear_2(neighbor_2)))
             hidden = self.dropout(hidden)
             return self.classifier(hidden).squeeze(-1)
 
-    model = UserGraphSAGE(x.size(1), hidden_dim)
+    model = UserGraphSAGE(x.size(1), hidden_dim, _prior_logit)
     labels = torch.full((len(graph.user_ids),), -1.0, dtype=torch.float32)
     label_frame = label_frame.copy()
     label_frame["user_id"] = pd.to_numeric(label_frame["user_id"], errors="coerce").astype("Int64")
@@ -182,8 +204,18 @@ def train_graphsage_model(
                 valid_probs = probabilities[valid_mask].detach().cpu().numpy()
                 valid_labels = labels[valid_mask].detach().cpu().numpy()
                 positive_mask = valid_labels.astype(int) == 1
+                # v43: Use AP (average precision) instead of mean probability difference.
+                # AP directly measures ranking quality — a key determinant of blend eligibility
+                # (AP >= 0.08 threshold). Mean-prob-diff can be maximized by outputting a large
+                # constant for all positives, which inflates the metric but gives poor AP.
+                # With AP as early stopping target, the model is guided toward better ranking.
                 if positive_mask.any() and (~positive_mask).any():
-                    score = float(valid_probs[positive_mask].mean() - valid_probs[~positive_mask].mean())
+                    try:
+                        from sklearn.metrics import average_precision_score as _ap
+                        score = float(_ap(valid_labels.astype(int), valid_probs))
+                    except Exception:
+                        # Fallback: mean probability difference if sklearn unavailable
+                        score = float(valid_probs[positive_mask].mean() - valid_probs[~positive_mask].mean())
                 else:
                     score = float(valid_probs.mean()) if len(valid_probs) else 0.0
             else:

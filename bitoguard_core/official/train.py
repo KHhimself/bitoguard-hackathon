@@ -87,8 +87,14 @@ _BASE_E_SEEDS = [42, 123]  # XGBoost: 2 seeds (slower model)
 # (degree=849) to dominate all connected nodes' embeddings, making more epochs worse.
 # With symmetric norm, hub influence scales as 1/sqrt(hub_degree * dst_degree), reducing
 # over-smoothing. 10 epochs adds ~7.5 min but may lift GNN from AP=0.033 to AP>0.08.
-PRIMARY_GRAPH_MAX_EPOCHS = 10
-FINAL_GRAPH_MIN_EPOCHS = 5
+# v43: Increase GNN epochs now that the model starts from a sensible prior (log(pi/(1-pi)) bias)
+# and uses input BatchNorm + AP-based early stopping (graph_model.py). With correct initialization,
+# the model needs more epochs to escape the prior and learn discriminative features.
+# PRIMARY (per-fold): 10→30 — allows early stopping (patience=8) to find true optimum.
+# FINAL: 5→20 — median of fold best epochs determines final budget; minimum 20 ensures
+# the final model at least matches per-fold training depth.
+PRIMARY_GRAPH_MAX_EPOCHS = 30
+FINAL_GRAPH_MIN_EPOCHS = 20
 
 
 def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
