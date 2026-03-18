@@ -93,7 +93,49 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(graph_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
+    # v33: Inline account-age velocity features — no parquet rebuild required.
+    # These catch "sleeper" fraudsters (old accounts that suddenly activate):
+    #   - OOF analysis: hard FNs have account_age=556 days vs TPs=269 days
+    #   - All FNs have low base_a_prob (~0.12) because lifecycle signals alone don't flag them
+    #   - Account-age normalized volume/velocity can distinguish sudden-activation sleepers
+    dataset = _add_account_age_velocity_features(dataset)
     return dataset
+
+
+def _add_account_age_velocity_features(dataset: pd.DataFrame) -> pd.DataFrame:
+    """Add account-age normalized velocity features to the dataset (v33+).
+
+    These features are computed inline (without rebuilding the parquet) to
+    catch 'sleeper' accounts: old accounts with low base lifecycle signals
+    but unusually high recent activity for their age.
+
+    All features are clipped and float32 to prevent outlier domination.
+    Note: rolling window columns (7d/30d) are all-zero in the static parquet snapshot,
+    so only lifetime-aggregate features are used here.
+    """
+    import numpy as _np
+    df = dataset.copy()
+    _age = df.get("account_age_days", _np.zeros(len(df))).fillna(0).astype(float) + 1.0
+    _twd_count = (df.get("twd_deposit_count", 0).fillna(0) + df.get("twd_withdraw_count", 0).fillna(0)).astype(float)
+    _crypto_count = (df.get("crypto_deposit_count", 0).fillna(0) + df.get("crypto_withdraw_count", 0).fillna(0)).astype(float)
+    _twd_sum = df.get("twd_total_sum", 0).fillna(0).astype(float)
+    _crypto_sum = df.get("crypto_total_sum", 0).fillna(0).astype(float)
+    _swap_count = df.get("swap_total_count", 0).fillna(0).astype(float)
+    _twd_active = df.get("twd_active_days", 0).fillna(0).astype(float) + 1.0
+    _crypto_active = df.get("crypto_active_days", 0).fillna(0).astype(float) + 1.0
+    # Transactions-per-day-of-account-life: high for newly-active sleeper accounts
+    df["twd_txn_count_per_account_age"] = (_twd_count / _age).clip(0, 50).astype("float32")
+    df["crypto_txn_count_per_account_age"] = (_crypto_count / _age).clip(0, 50).astype("float32")
+    # Log volume-per-account-age: captures disproportionate activity relative to lifetime
+    df["twd_sum_per_account_age"] = (_np.log1p(_twd_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
+    df["crypto_sum_per_account_age"] = (_np.log1p(_crypto_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
+    # Swap intensity per account age: mules diversify assets rapidly via swaps
+    df["swap_count_per_account_age"] = (_swap_count / _age).clip(0, 10).astype("float32")
+    # Active-day concentration: fraction of account lifetime spent actively transacting
+    # Old mules with recent bursts will have low concentration (dormant then suddenly active)
+    df["twd_active_day_concentration"] = (_twd_active / _age).clip(0, 1).astype("float32")
+    df["crypto_active_day_concentration"] = (_crypto_active / _age).clip(0, 1).astype("float32")
+    return df
 
 
 def _artifact_paths(paths: Any) -> dict[str, Path]:
