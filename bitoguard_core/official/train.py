@@ -120,6 +120,8 @@ def _add_account_age_velocity_features(dataset: pd.DataFrame) -> pd.DataFrame:
     _crypto_count = (df.get("crypto_deposit_count", 0).fillna(0) + df.get("crypto_withdraw_count", 0).fillna(0)).astype(float)
     _twd_sum = df.get("twd_total_sum", 0).fillna(0).astype(float)
     _crypto_sum = df.get("crypto_total_sum", 0).fillna(0).astype(float)
+    _crypto_withdraw_sum = df.get("crypto_withdraw_sum", 0).fillna(0).astype(float)
+    _swap_sum = df.get("swap_total_sum", 0).fillna(0).astype(float)
     _swap_count = df.get("swap_total_count", 0).fillna(0).astype(float)
     _twd_active = df.get("twd_active_days", 0).fillna(0).astype(float) + 1.0
     _crypto_active = df.get("crypto_active_days", 0).fillna(0).astype(float) + 1.0
@@ -129,8 +131,20 @@ def _add_account_age_velocity_features(dataset: pd.DataFrame) -> pd.DataFrame:
     # Log volume-per-account-age: captures disproportionate activity relative to lifetime
     df["twd_sum_per_account_age"] = (_np.log1p(_twd_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
     df["crypto_sum_per_account_age"] = (_np.log1p(_crypto_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
-    # Swap intensity per account age: mules diversify assets rapidly via swaps
+    # Crypto withdrawal intensity per account age (AP=0.1279, strongest univariate feature).
+    # Fraud signal concentrates in withdrawals (getting illicit funds out), not deposits.
+    df["crypto_withdraw_sum_per_account_age"] = (_np.log1p(_crypto_withdraw_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
+    # Swap intensity per account age: mules diversify assets rapidly via swaps (AP=0.1141)
+    df["swap_sum_per_account_age"] = (_np.log1p(_swap_sum) / _np.log1p(_age)).clip(0, 10).astype("float32")
     df["swap_count_per_account_age"] = (_swap_count / _age).clip(0, 10).astype("float32")
+    # Peak-transaction intensity per account age: captures one-off large transactions in old accounts.
+    # crypto_withdraw_max_per_account_age AP=0.1046, twd_deposit_max_per_account_age AP=0.0961
+    _crypto_withdraw_max = df.get("crypto_withdraw_max", 0).fillna(0).astype(float)
+    _twd_deposit_max = df.get("twd_deposit_max", 0).fillna(0).astype(float)
+    _crypto_total_max = df.get("crypto_total_max", 0).fillna(0).astype(float)
+    df["crypto_withdraw_max_per_account_age"] = (_np.log1p(_crypto_withdraw_max) / _np.log1p(_age)).clip(0, 10).astype("float32")
+    df["twd_deposit_max_per_account_age"] = (_np.log1p(_twd_deposit_max) / _np.log1p(_age)).clip(0, 10).astype("float32")
+    df["crypto_total_max_per_account_age"] = (_np.log1p(_crypto_total_max) / _np.log1p(_age)).clip(0, 10).astype("float32")
     # Active-day concentration: fraction of account lifetime spent actively transacting
     # Old mules with recent bursts will have low concentration (dormant then suddenly active)
     df["twd_active_day_concentration"] = (_twd_active / _age).clip(0, 1).astype("float32")
@@ -323,8 +337,10 @@ def train_official_model() -> dict[str, Any]:
     # BlendEnsemble (linear) gains only +0.005 AP over Base A alone because:
     #   - Base B AP=0.0867 (compressed probs, std=0.012) adds minimal signal to linear blend
     #   - CatBoost stacker learns "base_a > t1 AND anomaly > t2" interactions that LR/blend miss
-    # use_nonlinear=True enables the existing _fit_catboost_stacker (depth=3) per fold.
-    primary_oof, stacker_model = build_stacker_oof(primary_oof, primary_split, fold_column="primary_fold", use_blend=False, use_nonlinear=True)
+    # v33: Reverted to blend ensemble — CatBoost stacker (v32) regressed AP to 0.2973
+    # vs blend AP 0.3017 (+0.006 advantage). Blend directly maximizes F1 over all
+    # integer weight compositions at step=0.05; CatBoost overfits on the small meta-level.
+    primary_oof, stacker_model = build_stacker_oof(primary_oof, primary_split, fold_column="primary_fold", use_blend=True)
     primary_oof.to_parquet(artifacts["oof"], index=False)
 
     label_frame = _label_frame(dataset)
