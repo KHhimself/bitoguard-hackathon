@@ -159,46 +159,53 @@ def tune_blend_weights(frame: pd.DataFrame) -> dict[str, float]:
     arrays = np.stack([eligible[c] for c in cols], axis=0)  # (n_cols, n_samples)
     n = len(cols)
 
-    # Build all weight combinations summing to 1 at step=0.10.
-    # Vectorized approach: generate combos as matrix, compute all blends at once.
-    step = 0.10
-    grid = np.round(np.arange(0.0, 1.0 + step / 2, step), 2)
+    # Build all weight combinations summing to 1 at step=0.05.
+    # Finer grid (vs 0.10) improves precision while remaining tractable:
+    # n=5 cols → C(20+4,4)=10626 combos, fully vectorized per threshold.
+    # Use integer composition enumeration (not itertools.product) to avoid O(21^5)=4M overhead.
+    step = 0.05
+    parts = round(1.0 / step)  # 20 for step=0.05
 
-    from itertools import product as _product
-    combos: list[list[float]] = []
-    for ws in _product(grid, repeat=n):
-        if abs(sum(ws) - 1.0) < 1e-9:
-            combos.append(list(ws))
+    def _integer_compositions(total: int, k: int) -> list[list[int]]:
+        if k == 1:
+            return [[total]]
+        result: list[list[int]] = []
+        for first in range(total + 1):
+            for rest in _integer_compositions(total - first, k - 1):
+                result.append([first] + rest)
+        return result
+
+    combos: list[list[float]] = [[v * step for v in comp] for comp in _integer_compositions(parts, n)]
     if not combos:
         return {col: 1.0 / n for col in cols}
 
     combo_mat = np.array(combos, dtype=np.float32)  # (n_combos, n_cols)
     # Blend scores: (n_combos, n_samples) = combo_mat @ arrays
-    blend_scores = combo_mat @ arrays  # (n_combos, n_samples)
+    blend_scores = (combo_mat @ arrays).astype(np.float32)  # (n_combos, n_samples)
 
-    # Vectorized F1 grid over thresholds.
-    thresholds = np.arange(0.05, 0.90, 0.02)
-    pos_total = int(y.sum())
-    neg_total = len(y) - pos_total
+    # Fully vectorized F1 grid over thresholds.
+    # For each threshold: compute TP/FP/FN for ALL combos simultaneously.
+    # Memory per iteration: (n_combos, n_samples) bool ≈ n_combos * n_samples bytes.
+    thresholds = np.arange(0.05, 0.90, 0.01)
+    y_bool = (y == 1)
+    pos_total = int(y_bool.sum())
+    best_f1_per_combo = np.zeros(len(combo_mat), dtype=np.float32)
 
-    best_idx = 0
-    best_f1 = -1.0
-    for i in range(len(combo_mat)):
-        scores_i = blend_scores[i]
-        for t in thresholds:
-            pred = scores_i >= t
-            tp = int((pred & (y == 1)).sum())
-            fp = int((pred & (y == 0)).sum())
-            fn = pos_total - tp
-            if tp == 0:
-                continue
-            prec = tp / (tp + fp)
-            rec = tp / (tp + fn)
-            f = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-            if f > best_f1:
-                best_f1 = f
-                best_idx = i
+    for t in thresholds:
+        pred = blend_scores >= t  # (n_combos, n_samples), bool
+        tp = pred[:, y_bool].sum(axis=1).astype(np.float32)   # (n_combos,)
+        pp = pred.sum(axis=1).astype(np.float32)               # predicted positives
+        fp = pp - tp
+        fn = pos_total - tp
+        denom_p = tp + fp
+        denom_r = tp + fn
+        prec = np.where(denom_p > 0, tp / denom_p, 0.0)
+        rec = np.where(denom_r > 0, tp / denom_r, 0.0)
+        denom_f = prec + rec
+        f1 = np.where(denom_f > 0, 2.0 * prec * rec / denom_f, 0.0)
+        np.maximum(best_f1_per_combo, f1, out=best_f1_per_combo)
 
+    best_idx = int(best_f1_per_combo.argmax())
     best_w = combo_mat[best_idx].tolist()
     return {col: float(w) for col, w in zip(cols, best_w) if w > 1e-6}
 
