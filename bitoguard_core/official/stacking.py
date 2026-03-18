@@ -76,6 +76,14 @@ STACKER_FEATURE_COLUMNS = [
     "base_a_x_e",
     "base_cs_x_anomaly",
     "base_b_x_cs",
+    # v44: Graph isolation signal — measures how much the graph REDUCED the CatBoost prediction.
+    # cs_deficit = base_a - base_c_s_probability.
+    # Positive value: C&S smoothed the user DOWN (they're graph-isolated or near negatives).
+    # Negative value: C&S boosted the user UP (they're connected to fraud clusters).
+    # Analysis: cs_deficit AP=0.197, pos_mean=0.152, neg_mean=0.047.
+    # Isolated positives (735, 45% of all positives) have cs_deficit≈0.11 (graph hurt them).
+    # Valuable for nonlinear stackers that can learn: "high base_a + large cs_deficit → isolated fraudster".
+    "cs_deficit",
 ]
 
 # Columns eligible for the AP-weighted blend (non-rule, non-meta columns).
@@ -185,6 +193,11 @@ def _add_base_meta_features(frame: pd.DataFrame) -> pd.DataFrame:
     #   base_b uses graph structure as features; C&S propagates scores on the graph.
     #   Their product provides strong confirmation for graph-connected fraud.
     frame["base_b_x_cs"] = (b * cs).astype(np.float32)
+    # v44: Graph isolation residual — base_a minus C&S-corrected probability.
+    # Positive = C&S reduced the prediction (user is graph-isolated or near negatives).
+    # Negative = C&S boosted the prediction (user is connected to fraud clusters).
+    # Provides explicit isolation signal for nonlinear stackers.
+    frame["cs_deficit"] = (a - cs).astype(np.float32)
     return frame
 
 

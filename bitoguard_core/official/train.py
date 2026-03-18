@@ -194,6 +194,34 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset["total_activity_sparsity"] = (
         _np.log1p(_age / (_twd_days + _swap_days + _crypto_days + 1.0))
     ).clip(0, 8).astype("float32")
+
+    # v44: Amount-per-account-age features — orthogonal to count-based velocity.
+    # These normalize total transaction VALUE by account_age_days rather than active_days.
+    # Analysis results:
+    #   crypto_volume_per_age:    AUC=0.707, AP=0.111 (vs crypto_txn_velocity AUC=0.632, AP=0.052)
+    #   crypto_withdraw_per_age:  AUC=0.696, AP=0.124 — specifically targets crypto outflow rate
+    #   twd_volume_per_age:       AUC=0.696, AP=0.114, corr(twd_total_sum)=0.19 (orthogonal!)
+    #   swap_volume_per_age:      AUC=0.667, AP=0.119, corr(swap_total_sum)≈0.2 (orthogonal!)
+    # Hard FNs (account_age=539d, moderate volumes): per-day volume shows concentrated activity.
+    # All divisors (total_sum, etc.) are in feature set — but age-normalization is more tree-efficient
+    # (1 split vs 2+ to capture ratio) and avoids depth waste.
+    _crypto_sum = dataset["crypto_total_sum"].fillna(0).clip(0).astype("float32")
+    _crypto_withdraw_sum = dataset["crypto_withdraw_sum"].fillna(0).clip(0).astype("float32")
+    _twd_sum = dataset["twd_total_sum"].fillna(0).clip(0).astype("float32")
+    _swap_sum = dataset["swap_total_sum"].fillna(0).clip(0).astype("float32")
+    _age_safe = _age.clip(1)  # avoid division by zero
+    dataset["crypto_volume_per_age"] = (
+        _np.log1p(_crypto_sum / _age_safe)
+    ).clip(0, 15).astype("float32")
+    dataset["crypto_withdraw_per_age"] = (
+        _np.log1p(_crypto_withdraw_sum / _age_safe)
+    ).clip(0, 15).astype("float32")
+    dataset["twd_volume_per_age"] = (
+        _np.log1p(_twd_sum / _age_safe)
+    ).clip(0, 15).astype("float32")
+    dataset["swap_volume_per_age"] = (
+        _np.log1p(_swap_sum / _age_safe)
+    ).clip(0, 15).astype("float32")
     return dataset
 
 
