@@ -34,20 +34,39 @@ def fit_lgbm(
     feature_columns: list[str],
     negative_weight: float = 1.0,
 ) -> ModelFitResult:
+    import lightgbm as lgb
     x_train, encoded_columns = encode_frame(train_frame, feature_columns)
     y_train = train_frame["status"].astype(int)
     sample_weight = _pu_sample_weight(y_train, negative_weight)
     runtime_params = lightgbm_runtime_params()
+    # v41: LightGBM hyperparameter improvements.
+    # - num_leaves: 31 → 127 — old value severely under-capacitated the model for ~160 features.
+    #   num_leaves=31 ≈ depth-5 tree; 127 ≈ depth-7, matching CatBoost depth=9 capacity better.
+    #   LightGBM leaf-wise growth with 127 leaves can capture complex interactions without
+    #   the depth bottleneck (CatBoost uses level-wise growth which is fundamentally different).
+    # - n_estimators: 400 → 2000 — with early stopping, optimal tree count is found automatically.
+    #   400 was fixed and possibly underfit; GPU training makes 2000 trees affordable.
+    # - early_stopping_rounds: 50 — prevents overfitting. Previously missing entirely!
+    #   Without this, LightGBM trained exactly 400 trees regardless of validation performance.
+    # - min_child_samples: 20 — leaf regularization (reduces overfitting on rare positive class).
+    # - reg_lambda: 5.0 — L2 regularization matching XGBoost (XGBoost also uses reg_lambda=5.0).
+    # Expected: Base D AP from 0.2705 → 0.285+ (better generalization on 160 features).
     model_kwargs = dict(
-        n_estimators=400,
+        n_estimators=2000,
         learning_rate=0.05,
-        num_leaves=31,
+        num_leaves=127,
         subsample=0.9,
         colsample_bytree=0.9,
+        min_child_samples=20,
+        reg_lambda=5.0,
         random_state=RANDOM_SEED,
         verbosity=-1,
         **runtime_params,
     )
+    _early_stop_callbacks = [
+        lgb.early_stopping(50, verbose=False),
+        lgb.log_evaluation(period=-1),
+    ]
     model = LGBMClassifier(**model_kwargs)
     validation_probabilities: list[float] | None = None
     x_valid = None
@@ -57,7 +76,7 @@ def fit_lgbm(
         y_valid = valid_frame["status"].astype(int)
     try:
         if x_valid is not None and y_valid is not None:
-            model.fit(x_train, y_train, sample_weight=sample_weight, eval_set=[(x_valid, y_valid)], eval_metric="binary_logloss")
+            model.fit(x_train, y_train, sample_weight=sample_weight, eval_set=[(x_valid, y_valid)], callbacks=_early_stop_callbacks)
             validation_probabilities = model.predict_proba(x_valid)[:, 1].tolist()
         else:
             model.fit(x_train, y_train, sample_weight=sample_weight)
@@ -72,7 +91,7 @@ def fit_lgbm(
             "device_type": "cpu",
         })
         if x_valid is not None and y_valid is not None:
-            model.fit(x_train, y_train, sample_weight=sample_weight, eval_set=[(x_valid, y_valid)], eval_metric="binary_logloss")
+            model.fit(x_train, y_train, sample_weight=sample_weight, eval_set=[(x_valid, y_valid)], callbacks=_early_stop_callbacks)
             validation_probabilities = model.predict_proba(x_valid)[:, 1].tolist()
         else:
             model.fit(x_train, y_train, sample_weight=sample_weight)

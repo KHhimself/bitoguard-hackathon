@@ -51,6 +51,17 @@ STACKER_FEATURE_COLUMNS = [
     # base_a × C&S: when label-free CatBoost AND graph-propagated signal both agree,
     # the product is very high (high-confidence fraud) vs negatives where one is near 0.
     "base_a_x_cs",
+    # v41: Additional cross-model confirmation features — AP=0.303-0.309 on OOF.
+    # base_d × C&S: LightGBM (leaf-wise, different regularization) × graph correction.
+    #   AP=0.303 > base_d alone (0.271) — filtering to LightGBM-AND-graph-confirmed fraud.
+    # base_e × C&S: XGBoost × graph correction.
+    #   AP=0.309 > base_e alone (0.287) — similar cross-model amplification.
+    # These are orthogonal to base_a_x_cs (CatBoost-based) because LightGBM/XGBoost
+    # use different tree structures and regularization, capturing different FN subgroups.
+    # Not in blend candidates (would require n=6 at step=0.05 → 53K combos, OOM).
+    # Reserved for future nonlinear stacker experiments.
+    "base_d_x_cs",
+    "base_e_x_cs",
 ]
 
 # Columns eligible for the AP-weighted blend (non-rule, non-meta columns).
@@ -133,6 +144,13 @@ def _add_base_meta_features(frame: pd.DataFrame) -> pd.DataFrame:
     # Eligible for blend (AP > 0.08 threshold) and improves blend F1 when step adaptive.
     cs = pd.to_numeric(frame.get("base_c_s_probability", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
     frame["base_a_x_cs"] = (a * cs).astype(np.float32)
+    # v41: Cross-model confirmation products for future nonlinear stacker experiments.
+    # base_d_x_cs (AP=0.303): LightGBM × C&S — orthogonal to CatBoost-based base_a_x_cs.
+    # base_e_x_cs (AP=0.309): XGBoost × C&S — further diversity.
+    d = pd.to_numeric(frame.get("base_d_probability", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+    e = pd.to_numeric(frame.get("base_e_probability", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+    frame["base_d_x_cs"] = (d * cs).astype(np.float32)
+    frame["base_e_x_cs"] = (e * cs).astype(np.float32)
     return frame
 
 

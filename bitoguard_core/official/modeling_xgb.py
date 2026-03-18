@@ -39,7 +39,12 @@ def fit_xgboost(
 
     positives = max(1, int(y_train.sum()))
     negatives = max(1, len(y_train) - positives)
-    scale_pos_weight = min(float(negatives) / positives, 10.0)
+    # v41: Raise XGBoost scale_pos_weight cap from 10x to 15x.
+    # Actual imbalance ~30x; 10x was leaving positives under-weighted.
+    # CatBoost recovered with max_class_weight=10.6 (HPO best). XGBoost
+    # handles class imbalance differently (direct gradient scaling vs tree-level),
+    # so 15x provides stronger positive signal without gradient collapse risk.
+    scale_pos_weight = min(float(negatives) / positives, 15.0)
 
     runtime_params = xgboost_runtime_params()
     p = params or {}
