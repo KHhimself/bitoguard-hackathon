@@ -94,44 +94,13 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(graph_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
-    # v34: Inline orthogonal features — only features genuinely different from existing columns.
-    # Velocity features (v33) caused -0.004 F1 regression due to collinearity with
-    # account_age_days + sums. Career-peer z-scores are kept (genuinely new signal).
-    dataset = _add_inline_features(dataset)
+    # v34: No inline features. Velocity features (v33) caused -0.004 F1 regression.
+    # Career-peer z-scores also rejected: within-base_a-decile analysis shows r<0.01
+    # — CatBoost OTS on categorical `career` already captures the cohort signal.
+    # Clean 160-feature set + better HPO is the path forward.
     return dataset
 
 
-def _add_inline_features(dataset: pd.DataFrame) -> pd.DataFrame:
-    """Add inline-computed features that don't require rebuilding the feature parquet.
-
-    v34: Removed account-age velocity features (v33 experiment showed -0.004 F1 regression
-    due to feature collinearity — CatBoost already captures these via existing account_age_days
-    and sum features). Only keeping truly orthogonal features.
-
-    v34 keeps: career-peer z-scores for swap and crypto total (AP=0.0847, 0.0802).
-    These capture relative deviation vs career cohort — genuinely orthogonal to
-    the raw swap_total_sum + career categorical features CatBoost already has.
-    """
-    import numpy as _np
-    df = dataset.copy()
-    _career_col = "career"
-    if _career_col in df.columns:
-        _swap_sum = df.get("swap_total_sum", _np.zeros(len(df))).fillna(0).astype(float)
-        _crypto_total = df.get("crypto_total_sum", _np.zeros(len(df))).fillna(0).astype(float)
-        _career = df[_career_col].fillna(-1)
-        _swap_log = _np.log1p(_swap_sum)
-        _crypto_log = _np.log1p(_crypto_total)
-        _tmp = df[["user_id"]].copy()
-        _tmp["_swap_log"] = _swap_log.values
-        _tmp["_crypto_log"] = _crypto_log.values
-        _tmp["_career"] = _career.values
-        _cohort_swap_med = _tmp.groupby("_career")["_swap_log"].transform("median")
-        _cohort_swap_std = _tmp.groupby("_career")["_swap_log"].transform("std").fillna(1.0).clip(lower=0.1)
-        _cohort_crypto_med = _tmp.groupby("_career")["_crypto_log"].transform("median")
-        _cohort_crypto_std = _tmp.groupby("_career")["_crypto_log"].transform("std").fillna(1.0).clip(lower=0.1)
-        df["swap_sum_vs_career_peer"] = ((_swap_log.values - _cohort_swap_med.values) / _cohort_swap_std.values).clip(-5, 5).astype("float32")
-        df["crypto_total_vs_career_peer"] = ((_crypto_log.values - _cohort_crypto_med.values) / _cohort_crypto_std.values).clip(-5, 5).astype("float32")
-    return df
 
 
 def _artifact_paths(paths: Any) -> dict[str, Path]:
