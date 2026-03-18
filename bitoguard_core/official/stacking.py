@@ -156,62 +156,51 @@ def tune_blend_weights(frame: pd.DataFrame) -> dict[str, float]:
         return {list(eligible)[0]: 1.0}
 
     cols = list(eligible)
-    arrays = [eligible[c] for c in cols]
+    arrays = np.stack([eligible[c] for c in cols], axis=0)  # (n_cols, n_samples)
     n = len(cols)
 
-    # Coarse grid search: weights in [0, 1] with step 0.1, must sum to 1.
-    # For efficiency, restrict first model (highest-AP) to ≥ 0.3.
-    # Sort by AP descending so highest-AP gets the largest grid share.
-    ap_scores = [float(average_precision_score(y, v)) for v in arrays]
-    order = sorted(range(n), key=lambda i: -ap_scores[i])
-    cols = [cols[i] for i in order]
-    arrays = [arrays[i] for i in order]
-
-    best_f1 = -1.0
-    best_weights: list[float] = [1.0 / n] * n
-
+    # Build all weight combinations summing to 1 at step=0.10.
+    # Vectorized approach: generate combos as matrix, compute all blends at once.
     step = 0.10
-    grid = np.arange(0.0, 1.0 + step / 2, step)
+    grid = np.round(np.arange(0.0, 1.0 + step / 2, step), 2)
 
-    def _search(resolution: float) -> None:
-        nonlocal best_f1, best_weights
-        g = np.arange(0.0, 1.0 + resolution / 2, resolution)
-        for w0 in g:
-            if n >= 1 and w0 < 0.3:
-                continue  # First model (highest AP) must have ≥ 30% weight.
-            for w1 in g:
-                remaining = 1.0 - w0 - w1
-                if remaining < -1e-6:
-                    continue
-                if n == 2:
-                    w_tuple = [w0, remaining]
-                    if abs(sum(w_tuple) - 1.0) > 1e-6:
-                        continue
-                elif n == 3:
-                    for w2 in g:
-                        if abs(w0 + w1 + w2 - 1.0) > 1e-6:
-                            continue
-                        w_tuple = [w0, w1, w2]
-                        blend = sum(w * arr for w, arr in zip(w_tuple, arrays))
-                        thr_f1 = _best_f1(y, blend)
-                        if thr_f1 > best_f1:
-                            best_f1 = thr_f1
-                            best_weights = list(w_tuple)
-                    continue
-                else:
-                    # n ≥ 4: split remaining evenly across the rest.
-                    rest = remaining / max(1, n - 2)
-                    w_tuple = [w0, w1] + [rest] * (n - 2)
-                    if abs(sum(w_tuple) - 1.0) > 1e-6:
-                        continue
-                blend = sum(w * arr for w, arr in zip(w_tuple, arrays))
-                thr_f1 = _best_f1(y, blend)
-                if thr_f1 > best_f1:
-                    best_f1 = thr_f1
-                    best_weights = list(w_tuple)
+    from itertools import product as _product
+    combos: list[list[float]] = []
+    for ws in _product(grid, repeat=n):
+        if abs(sum(ws) - 1.0) < 1e-9:
+            combos.append(list(ws))
+    if not combos:
+        return {col: 1.0 / n for col in cols}
 
-    _search(0.10)
-    return {col: float(w) for col, w in zip(cols, best_weights) if w > 1e-6}
+    combo_mat = np.array(combos, dtype=np.float32)  # (n_combos, n_cols)
+    # Blend scores: (n_combos, n_samples) = combo_mat @ arrays
+    blend_scores = combo_mat @ arrays  # (n_combos, n_samples)
+
+    # Vectorized F1 grid over thresholds.
+    thresholds = np.arange(0.05, 0.90, 0.02)
+    pos_total = int(y.sum())
+    neg_total = len(y) - pos_total
+
+    best_idx = 0
+    best_f1 = -1.0
+    for i in range(len(combo_mat)):
+        scores_i = blend_scores[i]
+        for t in thresholds:
+            pred = scores_i >= t
+            tp = int((pred & (y == 1)).sum())
+            fp = int((pred & (y == 0)).sum())
+            fn = pos_total - tp
+            if tp == 0:
+                continue
+            prec = tp / (tp + fp)
+            rec = tp / (tp + fn)
+            f = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+            if f > best_f1:
+                best_f1 = f
+                best_idx = i
+
+    best_w = combo_mat[best_idx].tolist()
+    return {col: float(w) for col, w in zip(cols, best_w) if w > 1e-6}
 
 
 def _best_f1(y: np.ndarray, scores: np.ndarray) -> float:
