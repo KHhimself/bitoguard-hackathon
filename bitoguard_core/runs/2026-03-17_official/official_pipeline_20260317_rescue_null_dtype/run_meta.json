@@ -1,0 +1,25 @@
+{
+  "run_id": "official_pipeline_20260317_rescue_null_dtype",
+  "rescue_run": true,
+  "original_run_id": "official_pipeline_20260317",
+  "rescue_reason": "CatBoost GPU (and CPU) mode failed with TypeError on None values in categorical columns",
+  "failure_stage": "train",
+  "failure_detail": "TypeError: must be real number, not NoneType - 92 all-null object-dtype columns in official_user_features_full.parquet misidentified as categorical by fit_catboost(). Root cause: ROLLING_WINDOWS with empty time windows produce all-None object-dtype columns after left-merge; features.py numeric_fill_zero only fills already-numeric dtype columns.",
+  "modifications": {
+    "feature_parquet_dtype_fix": {
+      "description": "Cast 92 all-null object-dtype windowed feature columns to float64 in official_user_features_full.parquet before train stage. These columns represent numeric aggregations (count/sum/avg/max) over empty time windows and contain no information regardless of dtype. Casting to float64 prevents CatBoost from treating them as categorical features.",
+      "columns_fixed": 92,
+      "method": "df[col].astype('float64') for each all-null object column",
+      "semantic_impact": "None - all-null columns provide zero information in either float64 or object dtype representation"
+    }
+  },
+  "command": "PYTHONPATH=. python -m official.pipeline (features stage cached; train stage onward)",
+  "git_commit": "b10a5b5bd68d411e73cdef36c22b7949f49c2302",
+  "environment": {
+    "python_version": "3.12.11",
+    "torch_version": "2.8.0+cu128",
+    "catboost_version": "1.2.10",
+    "gpu": "NVIDIA GeForce RTX 2080",
+    "cuda_available": true
+  }
+}

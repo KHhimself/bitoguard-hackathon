@@ -1,0 +1,28 @@
+{
+  "run_id": "official_pipeline_20260317_rescue_v2",
+  "rescue_run": true,
+  "original_run_id": "official_pipeline_20260317",
+  "rescue_reason": "Multiple pre-existing bugs in working-tree modeling.py + feature dtype issue",
+  "failure_stages": ["train (TypeError NoneType)", "train (CatBoostError focal syntax)", "train (OOM from background process)"],
+  "modifications": {
+    "fix1_feature_dtype": {
+      "description": "Cast 92 all-null object-dtype windowed feature columns to float64. ROLLING_WINDOWS features (1d/3d/7d/30d) for twd/crypto/swap tables are all-None because the data ends Nov 2025 but cutoff is Feb 2026. The features.py numeric_fill_zero pass only handles already-numeric-dtype cols.",
+      "files_modified": ["artifacts/official_features/official_user_features_full.parquet"],
+      "semantic_impact": "None - all-null columns contribute zero information"
+    },
+    "fix2_focal_syntax": {
+      "description": "Monkey-patch fit_catboost to use 'Focal:focal_alpha=0.25;focal_gamma=2.0' instead of 'Logloss:focal_gamma=2.0'. The working-tree code comment explicitly states this is the correct CatBoost 1.2.x syntax but the code line was not updated.",
+      "semantic_impact": "Enables focal loss training as designed by the researcher"
+    },
+    "fix3_focal_gpu": {
+      "description": "Force task_type='CPU' for CatBoost when using Focal loss. Focal loss is not supported for GPU training in CatBoost 1.2.x.",
+      "semantic_impact": "CPU gives identical mathematical results to GPU for this operation"
+    },
+    "fix4_class_weights": {
+      "description": "Omit class_weights when using Focal loss. CatBoost rejects class_weights for Focal loss function. Focal loss inherently handles class imbalance via focal_alpha=0.25.",
+      "semantic_impact": "Focal loss handles imbalance - class_weights not needed and not supported"
+    }
+  },
+  "git_commit": "b10a5b5bd68d411e73cdef36c22b7949f49c2302",
+  "rescue_script": "runs/run_official_rescue_final.py"
+}
