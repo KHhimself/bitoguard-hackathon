@@ -18,6 +18,8 @@ from features.build_features import build_feature_snapshots
 from features.graph_features import build_graph_features
 from models.score import score_latest_snapshot
 from pipeline.rebuild_edges import rebuild_edges
+from services.drift import run_score_drift_check
+from services.model_monitor import check_model_staleness, check_score_sanity
 
 _SAFE_COLUMN_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
@@ -424,6 +426,20 @@ def refresh_live() -> dict[str, Any]:
     )
     _stage_marker("start", started_at, mode=REFRESH_MODE, last_source_event_at=_timestamp_json(prior_watermark))
 
+    # Model staleness check: warn if model bundle is ageing, error if critically stale
+    try:
+        _bundle_path = settings.artifact_dir / "official_bundle.json"
+        if _bundle_path.exists():
+            _staleness = check_model_staleness(_bundle_path)
+            _stage_marker(
+                "model_staleness_check",
+                started_at,
+                staleness=_staleness.staleness_level,
+                age_days=_staleness.age_days,
+            )
+    except Exception as _stale_exc:
+        logger.warning("Model staleness check failed (non-fatal): %s", _stale_exc)
+
     try:
         current_source_event_at = _current_source_event_at(store)
         if current_source_event_at is None:
@@ -486,6 +502,7 @@ def refresh_live() -> dict[str, Any]:
         _stage_marker("affected_users", started_at, affected_user_count=len(direct_user_ids))
 
         predictions: pd.DataFrame | None = None
+        _score_psi_info: dict[str, object] = {}
         if direct_user_ids:
             if _graph_rebuild_required(store, window_start, current_source_event_at):
                 rebuild_edges()
@@ -568,6 +585,32 @@ def refresh_live() -> dict[str, Any]:
                     prediction_rows=len(predictions),
                     high_risk_count=int(predictions["risk_level"].isin(["high", "critical"]).sum()),
                 )
+                # Score sanity: verify score distribution is in expected ranges
+                try:
+                    import numpy as _np
+                    _scores_arr = _np.asarray(predictions["model_score"].dropna(), dtype=float)
+                    _sanity = check_score_sanity(_scores_arr)
+                    _score_psi_info["score_sanity_ok"] = _sanity.health_ok
+                    if not _sanity.health_ok:
+                        logger.warning("Score sanity failed: %s", _sanity.checks_failed)
+                except Exception as _san_exc:
+                    logger.warning("Score sanity check failed (non-fatal): %s", _san_exc)
+                # PSI-based score distribution monitoring: detect silent model degradation
+                # between consecutive scoring runs. Logs warning at PSI ≥ 0.10 (moderate)
+                # or ≥ 0.25 (severe). Result captured in summary for ops observability.
+                try:
+                    _score_drift = run_score_drift_check(str(settings.db_path))
+                    if _score_drift is not None:
+                        _score_psi_info["score_psi"] = _score_drift.psi
+                        _score_psi_info["score_psi_severity"] = _score_drift.psi_severity
+                        _stage_marker(
+                            "score_distribution_check",
+                            started_at,
+                            psi=round(_score_drift.psi, 4),
+                            severity=_score_drift.psi_severity,
+                        )
+                except Exception as _drift_exc:
+                    logger.warning("Score drift check failed (non-fatal): %s", _drift_exc)
 
         no_op = sum(updated_row_counts.values()) == 0 and predictions is None
         summary = _base_summary(
@@ -581,6 +624,7 @@ def refresh_live() -> dict[str, Any]:
         if predictions is not None:
             summary["prediction_rows"] = int(len(predictions))
             summary["high_risk_count"] = int(predictions["risk_level"].isin(["high", "critical"]).sum())
+        summary.update(_score_psi_info)  # score_psi, score_psi_severity, score_sanity_ok
 
         finished_at = _coerce_timestamp(utc_now())
         _write_refresh_state(
