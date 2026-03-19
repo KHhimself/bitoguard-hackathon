@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pandas as pd
 
 from config import load_settings
 from models.common import encode_features, feature_columns, load_feature_table, load_joblib, load_lgbm
+
+_log = logging.getLogger(__name__)
 
 
 def _resolve_model_path(settings, model_version: str | None) -> Path | None:
@@ -56,6 +59,7 @@ def explain_user(
     if features.empty:
         features = load_feature_table("features.feature_snapshots_user_day")
     if features.empty:
+        _log.warning("explain_user(%s): no feature snapshots found in v2 or user_day tables", user_id)
         return []
 
     snap_col = "snapshot_date" if "snapshot_date" in features.columns else None
@@ -65,20 +69,24 @@ def explain_user(
     else:
         frame = features[features["user_id"] == user_id].copy()
     if frame.empty:
+        _log.warning("explain_user(%s): user not found in feature snapshot (snapshot_date=%s)", user_id, snapshot_date)
         return []
 
     model_path = _resolve_model_path(settings, model_version)
     if model_path is None:
+        _log.warning("explain_user(%s): no LightGBM model found (model_version=%s)", user_id, model_version)
         return []
 
     meta = _load_model_meta(model_path)
     if not meta:
+        _log.warning("explain_user(%s): model metadata missing for %s", user_id, model_path)
         return []
 
     model = _load_lgbm_model(model_path)
     cols = feature_columns(frame)
     ref_cols = meta.get("encoded_columns") or meta.get("feature_columns")
     if not ref_cols:
+        _log.warning("explain_user(%s): model metadata has no feature column list (%s)", user_id, model_path)
         return []
     encoded, encoded_columns = encode_features(frame, cols, reference_columns=ref_cols)
 
@@ -91,6 +99,7 @@ def explain_user(
     else:
         shap_frame = pd.DataFrame(shap_values, columns=encoded_columns)
     if shap_frame.empty:
+        _log.warning("explain_user(%s): SHAP computation returned empty frame", user_id)
         return []
 
     factors = pd.DataFrame({

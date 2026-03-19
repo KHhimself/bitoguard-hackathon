@@ -12,12 +12,41 @@ interface DriftFeature {
   std_rel_change: number | null
 }
 
-interface DriftResult {
+interface FeatureDriftResult {
   snapshot_from: string
   snapshot_to: string
   drifted_features: DriftFeature[]
   total_checked: number
   total_drifted: number
+  health_ok: boolean
+}
+
+interface ScorePsiResult {
+  run_from: string
+  run_to: string
+  psi: number
+  psi_severity: string  // "ok", "moderate", "severe"
+  percentiles_from: Record<string, number>
+  percentiles_to: Record<string, number>
+  n_users_from: number
+  n_users_to: number
+  health_ok: boolean
+}
+
+interface ModelStalenessResult {
+  bundle_version: string
+  trained_at: string | null
+  age_days: number | null
+  staleness_level: string  // "ok", "warn", "error"
+  warn_threshold_days: number
+  error_threshold_days: number
+  health_ok: boolean
+}
+
+interface DriftResult {
+  feature_drift: FeatureDriftResult
+  score_psi: ScorePsiResult | null
+  model_staleness: ModelStalenessResult | null
   health_ok: boolean
 }
 
@@ -558,30 +587,30 @@ export default function ModelOpsPage() {
 
       {/* ── Feature drift ── */}
       {drift && (
-        <div className={`rounded-xl border shadow-sm overflow-hidden ${drift.health_ok ? "border-[#e5e7eb] bg-white" : "border-[#ef9a9a] bg-[#fff5f5]"}`}>
+        <div className={`rounded-xl border shadow-sm overflow-hidden ${drift.feature_drift.health_ok ? "border-[#e5e7eb] bg-white" : "border-[#ef9a9a] bg-[#fff5f5]"}`}>
           <div className="px-4 py-3 border-b border-[#e5e7eb] flex items-center justify-between">
             <div>
               <h2 className="text-[14px] font-semibold text-[#1a1d2e]">特徵漂移健康狀態</h2>
-              <p className="text-[11px] text-[#9ca3af] mt-0.5">{drift.snapshot_from} → {drift.snapshot_to}</p>
+              <p className="text-[11px] text-[#9ca3af] mt-0.5">{drift.feature_drift.snapshot_from} → {drift.feature_drift.snapshot_to}</p>
             </div>
-            <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${drift.health_ok ? "bg-[#e8f5e9] text-[#2e7d32]" : "bg-[#ffebee] text-[#c62828]"}`}>
-              {drift.health_ok ? <CheckCircle size={11} /> : <XCircle size={11} />}
-              {drift.health_ok ? "HEALTHY" : `${drift.total_drifted} DRIFTED`}
+            <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${drift.feature_drift.health_ok ? "bg-[#e8f5e9] text-[#2e7d32]" : "bg-[#ffebee] text-[#c62828]"}`}>
+              {drift.feature_drift.health_ok ? <CheckCircle size={11} /> : <XCircle size={11} />}
+              {drift.feature_drift.health_ok ? "HEALTHY" : `${drift.feature_drift.total_drifted} DRIFTED`}
             </span>
           </div>
           <div className="p-4 flex gap-6 text-[13px]">
             <div>
               <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">檢查特徵數</p>
-              <p className="text-[20px] font-semibold text-[#1a1d2e]">{drift.total_checked}</p>
+              <p className="text-[20px] font-semibold text-[#1a1d2e]">{drift.feature_drift.total_checked}</p>
             </div>
             <div>
               <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">漂移特徵數</p>
-              <p className={`text-[20px] font-semibold ${drift.total_drifted > 0 ? "text-[#e53935]" : "text-[#43a047]"}`}>
-                {drift.total_drifted}
+              <p className={`text-[20px] font-semibold ${drift.feature_drift.total_drifted > 0 ? "text-[#e53935]" : "text-[#43a047]"}`}>
+                {drift.feature_drift.total_drifted}
               </p>
             </div>
           </div>
-          {drift.drifted_features.length > 0 && (
+          {drift.feature_drift.drifted_features.length > 0 && (
             <div className="border-t border-[#e5e7eb] overflow-x-auto">
               <table className="w-full text-[13px]">
                 <thead>
@@ -592,7 +621,7 @@ export default function ModelOpsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {drift.drifted_features.map((row) => (
+                  {drift.feature_drift.drifted_features.map((row) => (
                     <tr key={row.feature} className="border-t border-[#f3f4f6] hover:bg-[#fff8f8]">
                       <td className="px-4 py-2 font-semibold text-[#e53935]" title={row.feature}>
                         {FEATURE_ZH[row.feature] ?? row.feature}
@@ -612,6 +641,92 @@ export default function ModelOpsPage() {
           )}
         </div>
       )}
+
+      {/* ── Score PSI ── */}
+      {drift?.score_psi && (() => {
+        const psi = drift.score_psi!
+        const severity = psi.psi_severity  // "ok", "moderate", "severe"
+        const sevColor = severity === "severe" ? { border: "border-[#ef9a9a] bg-[#fff5f5]", badge: "bg-[#ffebee] text-[#c62828]", icon: <XCircle size={11} /> }
+          : severity === "moderate" ? { border: "border-[#ffe082] bg-[#fffde7]", badge: "bg-[#fff8e1] text-[#b45309]", icon: <AlertTriangle size={11} /> }
+          : { border: "border-[#e5e7eb] bg-white", badge: "bg-[#e8f5e9] text-[#2e7d32]", icon: <CheckCircle size={11} /> }
+        return (
+          <div className={`rounded-xl border shadow-sm overflow-hidden ${sevColor.border}`}>
+            <div className="px-4 py-3 border-b border-[#e5e7eb] flex items-center justify-between">
+              <div>
+                <h2 className="text-[14px] font-semibold text-[#1a1d2e]">分數分布穩定性 (PSI)</h2>
+                <p className="text-[11px] text-[#9ca3af] mt-0.5">{psi.run_from} → {psi.run_to}</p>
+              </div>
+              <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${sevColor.badge}`}>
+                {sevColor.icon}
+                {severity.toUpperCase()} — PSI {psi.psi.toFixed(4)}
+              </span>
+            </div>
+            <div className="p-4 grid grid-cols-4 gap-4 text-[13px]">
+              <div>
+                <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">PSI 值</p>
+                <p className="text-[20px] font-semibold text-[#1a1d2e]">{psi.psi.toFixed(4)}</p>
+                <p className="text-[10px] text-[#9ca3af] mt-0.5">&lt;0.10 穩定 / 0.10-0.25 中度 / &gt;0.25 嚴重</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">參考樣本數</p>
+                <p className="text-[20px] font-semibold text-[#1a1d2e]">{psi.n_users_from.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">目前樣本數</p>
+                <p className="text-[20px] font-semibold text-[#1a1d2e]">{psi.n_users_to.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider mb-1">分數分位數對比</p>
+                {["p50", "p90", "p95", "p99"].map((k) => (
+                  <div key={k} className="flex justify-between text-[11px]">
+                    <span className="text-[#9ca3af]">{k}</span>
+                    <span className="font-mono">{(psi.percentiles_from[k] ?? 0).toFixed(4)} → {(psi.percentiles_to[k] ?? 0).toFixed(4)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── Model staleness ── */}
+      {drift?.model_staleness && (() => {
+        const st = drift.model_staleness!
+        const lvl = st.staleness_level  // "ok", "warn", "error"
+        const lvlStyle = lvl === "error" ? { border: "border-[#ef9a9a] bg-[#fff5f5]", badge: "bg-[#ffebee] text-[#c62828]", icon: <XCircle size={11} /> }
+          : lvl === "warn" ? { border: "border-[#ffe082] bg-[#fffde7]", badge: "bg-[#fff8e1] text-[#b45309]", icon: <AlertTriangle size={11} /> }
+          : { border: "border-[#e5e7eb] bg-white", badge: "bg-[#e8f5e9] text-[#2e7d32]", icon: <CheckCircle size={11} /> }
+        return (
+          <div className={`rounded-xl border shadow-sm overflow-hidden ${lvlStyle.border}`}>
+            <div className="px-4 py-3 border-b border-[#e5e7eb] flex items-center justify-between">
+              <div>
+                <h2 className="text-[14px] font-semibold text-[#1a1d2e]">模型新鮮度</h2>
+                <p className="text-[11px] text-[#9ca3af] mt-0.5 font-mono">{st.bundle_version}</p>
+              </div>
+              <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${lvlStyle.badge}`}>
+                {lvlStyle.icon}
+                {lvl.toUpperCase()}{st.age_days != null ? ` — ${st.age_days.toFixed(1)}天前訓練` : ""}
+              </span>
+            </div>
+            <div className="p-4 grid grid-cols-3 gap-4 text-[13px]">
+              <div>
+                <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">訓練時間</p>
+                <p className="text-[15px] font-semibold text-[#1a1d2e]">{st.trained_at ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">模型年齡</p>
+                <p className={`text-[20px] font-semibold ${lvl === "error" ? "text-[#e53935]" : lvl === "warn" ? "text-[#fb8c00]" : "text-[#43a047]"}`}>
+                  {st.age_days != null ? `${st.age_days.toFixed(1)} 天` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#9ca3af] uppercase tracking-wider">警告閾值</p>
+                <p className="text-[13px] text-[#6b7280]">警告 &gt;{st.warn_threshold_days}天 / 錯誤 &gt;{st.error_threshold_days}天</p>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }
