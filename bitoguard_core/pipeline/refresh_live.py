@@ -670,9 +670,56 @@ def refresh_live() -> dict[str, Any]:
         raise
 
 
+def refresh_live_with_retry(
+    max_retries: int = 2,
+    retry_delay_s: float = 5.0,
+) -> dict[str, Any]:
+    """Run refresh_live() with exponential-backoff retry for transient failures.
+
+    Retries on:
+    - duckdb.IOException (lock contention — another writer holds the DB)
+    - ConnectionError / TimeoutError (transient network failures to source API)
+
+    Does NOT retry on: ValueError, KeyError, RuntimeError, or other logic errors,
+    as those indicate non-transient failures that require investigation.
+
+    Args:
+        max_retries: Maximum number of retry attempts after the initial failure.
+        retry_delay_s: Initial delay in seconds before the first retry.
+                       Doubles on each subsequent retry (exponential backoff).
+
+    Returns:
+        Summary dict from refresh_live() on success.
+
+    Raises:
+        The last exception if all retries are exhausted.
+    """
+    import duckdb
+    _RETRYABLE = (duckdb.IOException, ConnectionError, TimeoutError)
+    attempt = 0
+    last_exc: BaseException | None = None
+    delay = retry_delay_s
+    while attempt <= max_retries:
+        try:
+            return refresh_live()
+        except _RETRYABLE as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                break
+            logger.warning(
+                "Transient refresh failure (attempt %d/%d): %s — retrying in %.1fs",
+                attempt + 1, max_retries + 1, exc, delay,
+            )
+            time.sleep(delay)
+            delay *= 2.0
+            attempt += 1
+    assert last_exc is not None
+    raise last_exc
+
+
 def main() -> dict[str, Any]:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    summary = refresh_live()
+    summary = refresh_live_with_retry()
     print(json.dumps(summary, ensure_ascii=False))
     return summary
 

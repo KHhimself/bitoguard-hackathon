@@ -1161,3 +1161,85 @@ def test_iforest_schema_guard_if_model_exists() -> None:
         f"IsolationForest metadata at {iforest_metas[-1]} is missing 'encoded_columns'. "
         "Retrain with negatives-only data on v2 features before enabling m4_enabled=True."
     )
+
+
+class TestRefreshLiveWithRetry:
+    """Tests for the transient-failure retry wrapper around refresh_live()."""
+
+    def test_succeeds_on_first_try(self, monkeypatch):
+        """No retry when refresh_live() succeeds immediately."""
+        from pipeline import refresh_live as rl_mod
+        call_count = 0
+
+        def fake_refresh():
+            nonlocal call_count
+            call_count += 1
+            return {"status": "success"}
+
+        monkeypatch.setattr(rl_mod, "refresh_live", fake_refresh)
+        result = rl_mod.refresh_live_with_retry(max_retries=2, retry_delay_s=0)
+        assert result["status"] == "success"
+        assert call_count == 1
+
+    def test_retries_on_transient_ioexception(self, monkeypatch):
+        """DuckDB IOException (lock contention) triggers retry."""
+        import duckdb
+        from pipeline import refresh_live as rl_mod
+        call_count = 0
+
+        def fake_refresh():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise duckdb.IOException("database is locked")
+            return {"status": "success"}
+
+        monkeypatch.setattr(rl_mod, "refresh_live", fake_refresh)
+        result = rl_mod.refresh_live_with_retry(max_retries=3, retry_delay_s=0)
+        assert result["status"] == "success"
+        assert call_count == 3
+
+    def test_raises_after_max_retries_exhausted(self, monkeypatch):
+        """If all retries fail, re-raises the last exception."""
+        import duckdb
+        from pipeline import refresh_live as rl_mod
+
+        def always_fails():
+            raise duckdb.IOException("database is locked forever")
+
+        monkeypatch.setattr(rl_mod, "refresh_live", always_fails)
+        with pytest.raises(duckdb.IOException, match="locked forever"):
+            rl_mod.refresh_live_with_retry(max_retries=2, retry_delay_s=0)
+
+    def test_does_not_retry_non_transient_errors(self, monkeypatch):
+        """ValueError (logic error) should propagate immediately without retry."""
+        from pipeline import refresh_live as rl_mod
+        call_count = 0
+
+        def fake_refresh():
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("schema mismatch — non-transient")
+
+        monkeypatch.setattr(rl_mod, "refresh_live", fake_refresh)
+        with pytest.raises(ValueError, match="non-transient"):
+            rl_mod.refresh_live_with_retry(max_retries=3, retry_delay_s=0)
+        # Should only be called once — no retry for ValueError
+        assert call_count == 1
+
+    def test_retries_on_connection_error(self, monkeypatch):
+        """ConnectionError (transient network failure) triggers retry."""
+        from pipeline import refresh_live as rl_mod
+        call_count = 0
+
+        def fake_refresh():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("source API unreachable")
+            return {"status": "success", "no_op": True}
+
+        monkeypatch.setattr(rl_mod, "refresh_live", fake_refresh)
+        result = rl_mod.refresh_live_with_retry(max_retries=1, retry_delay_s=0)
+        assert result["status"] == "success"
+        assert call_count == 2
