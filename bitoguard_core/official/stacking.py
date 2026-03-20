@@ -620,7 +620,7 @@ def choose_best_calibration_and_threshold(
     raw_probabilities: np.ndarray,
     labels: np.ndarray,
     group_ids: np.ndarray | None,
-    use_pu_adjustment: bool = True,
+    use_pu_adjustment: bool = False,
 ) -> tuple[dict[str, Any], Any, np.ndarray]:
     labels = np.asarray(labels, dtype=int)
     raw_probabilities = np.asarray(raw_probabilities, dtype=float)
