@@ -38,18 +38,33 @@ from official.train import (
 )
 from official.transductive_features import build_transductive_feature_frame
 
-# Best config (community + feature_eng - profile_sim - ppr)
-BEST_CONFIG = {
-    "community_features": True,
-    "feature_eng_node_attrs": True,
-    "pu_learning_loss": True,
-    "multi_scale_ppr": False,
-    "profile_similarity_edges": False,
-    "graphsage_3layer": False,
-}
+def _load_best_config() -> tuple[dict, float]:
+    """Load best valid config from experiment tracker; fall back to hardcoded seed4 result."""
+    import json
+    best_path = Path("artifacts/reports/best_valid_config.json")
+    if best_path.exists():
+        try:
+            data = json.loads(best_path.read_text())
+            print(f"[generate_submission] Loaded best config from tracker: "
+                  f"{data['experiment_id']} F1={data.get('f1', '?')}")
+            return data["config"], float(data.get("threshold", 0.18))
+        except Exception as e:
+            print(f"[generate_submission] Warning: could not parse best_valid_config.json: {e}")
+    # Hardcoded fallback: seed4 result (F1=0.3856 @ thr=0.18)
+    print("[generate_submission] Using hardcoded fallback config (seed4: F1=0.3856)")
+    return {
+        "community_features": True,
+        "feature_eng_node_attrs": True,
+        "pu_learning_loss": True,
+        "multi_scale_ppr": False,
+        "profile_similarity_edges": False,
+        "graphsage_3layer": False,
+    }, 0.18
 
-# OOF-derived values (from best seed4 run: F1=0.3856 @ thr=0.18)
-OOF_THRESHOLD = float(os.getenv("BITOGUARD_THRESHOLD", "0.18"))
+
+BEST_CONFIG, _best_threshold = _load_best_config()
+# OOF-derived values (from best valid experiment, overridable via env var)
+OOF_THRESHOLD = float(os.getenv("BITOGUARD_THRESHOLD", str(_best_threshold)))
 
 # Blend weights from seg-blend (from seed4 log):
 # Connected: {base_a:0.15, base_cs:0.25, base_e:0.05, cs_x_anomaly:0.55}

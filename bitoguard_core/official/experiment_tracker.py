@@ -17,12 +17,37 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import subprocess
+
 from official.common import load_official_paths
 
 EXPERIMENT_LOG = "experiment_log.jsonl"
 
+# Components known to leak labels into pre-fold features.
+# Any experiment with these set True gets valid=False in the log.
+LEAKING_COMPONENTS: dict[str, str] = {
+    "dgi_rf_features": (
+        "RF trained on full label_frame pre-fold; DGI node features include "
+        "is_positive_seed built from all labels (not per-fold train labels)."
+    ),
+    "label_spreading": (
+        "Label spreading uses full label_frame pre-fold → direct label leakage "
+        "(produces F1≈1.0 on OOF)."
+    ),
+}
+
 # P0-3: Cached set of active user IDs (populated lazily).
 _active_user_ids_cache: set[int] | None = None
+
+
+def _git_sha() -> str:
+    """Return short git SHA of HEAD, or 'unknown' if unavailable."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+        ).strip()[:12]
+    except Exception:
+        return "unknown"
 
 
 def _get_active_user_ids() -> set[int]:
@@ -111,9 +136,13 @@ def log_experiment(
     artifacts: list[str] | None = None,
     cohort_metrics: dict[str, Any] | None = None,
 ) -> None:
+    leaked_via = [k for k, v in config.items() if v is True and k in LEAKING_COMPONENTS]
     entry = {
         "experiment_id": experiment_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "git_sha": _git_sha(),
+        "valid": len(leaked_via) == 0,
+        "leakage_risk": leaked_via if leaked_via else None,
         "config": config,
         "metrics": metrics,
         "notes": notes,
@@ -132,7 +161,53 @@ def log_experiment(
         d_f1 = cohort_metrics.get("dormant", {}).get("f1", 0.0)
         a_f1 = cohort_metrics.get("active", {}).get("f1", 0.0)
         cohort_str = f" [dormant={d_f1:.4f}, active={a_f1:.4f}]"
-    print(f"[EXP] {experiment_id}: F1={f1_str}{cohort_str} | {notes}")
+    leak_str = f" ⚠ LEAKED({','.join(leaked_via)})" if leaked_via else ""
+    print(f"[EXP] {experiment_id}: F1={f1_str}{cohort_str}{leak_str} | {notes}")
+    # Auto-update best_valid_config.json if this is a new valid best
+    if not leaked_via and isinstance(metrics.get("f1"), (int, float)) and metrics["f1"] > 0:
+        best = get_best_valid_experiment()
+        if best and best["experiment_id"] == experiment_id:
+            _update_best_config_file(config, metrics, experiment_id)
+
+
+def get_best_valid_experiment() -> dict[str, Any] | None:
+    """Return the highest-F1 experiment with no label leakage.
+
+    Back-compat: entries without a 'valid' field are checked against
+    LEAKING_COMPONENTS in their config.
+    """
+    experiments = load_experiments()
+    valid = []
+    for exp in experiments:
+        f1 = exp.get("metrics", {}).get("f1", 0)
+        if f1 <= 0:
+            continue
+        if "valid" in exp:
+            if not exp["valid"]:
+                continue
+        else:
+            cfg = exp.get("config", {})
+            if any(cfg.get(k) for k in LEAKING_COMPONENTS):
+                continue
+        valid.append(exp)
+    if not valid:
+        return None
+    return max(valid, key=lambda e: e["metrics"].get("f1", 0))
+
+
+def _update_best_config_file(config: dict, metrics: dict, experiment_id: str) -> None:
+    """Write artifacts/reports/best_valid_config.json for generate_submission.py."""
+    path = _log_path().parent / "best_valid_config.json"
+    payload = {
+        "experiment_id": experiment_id,
+        "config": config,
+        "f1": metrics.get("f1"),
+        "threshold": metrics.get("threshold", 0.18),
+        "git_sha": _git_sha(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"[EXP] ★ New valid best → best_valid_config.json: F1={metrics.get('f1'):.4f} ({experiment_id})")
 
 
 def load_experiments() -> list[dict[str, Any]]:
@@ -150,28 +225,40 @@ def get_experiment(experiment_id: str) -> dict[str, Any] | None:
     return None
 
 
-def print_leaderboard(top_n: int = 20) -> None:
+def print_leaderboard(top_n: int = 20, valid_only: bool = False) -> None:
     experiments = load_experiments()
     if not experiments:
         print("No experiments logged yet.")
         return
+
+    def _is_leaked(exp: dict) -> bool:
+        if "valid" in exp:
+            return not exp["valid"]
+        cfg = exp.get("config", {})
+        return any(cfg.get(k) for k in LEAKING_COMPONENTS)
+
     sorted_exps = sorted(
         experiments,
         key=lambda e: e["metrics"].get("f1", e["metrics"].get("oof_f1", 0)),
         reverse=True,
     )
+    if valid_only:
+        sorted_exps = [e for e in sorted_exps if not _is_leaked(e)]
+
     has_cohort = any("cohort_metrics" in e for e in sorted_exps[:top_n])
     if has_cohort:
-        print(f"\n{'='*110}")
-        print(f"{'Rank':<5} {'Experiment ID':<42} {'F1':>8} {'P':>8} {'R':>8} {'AP':>8} {'Thr':>8} {'Dorm-F1':>9} {'Act-F1':>8}")
-        print(f"{'='*110}")
+        print(f"\n{'='*120}")
+        print(f"{'Rank':<5} {'Experiment ID':<42} {'F1':>8} {'P':>8} {'R':>8} {'AP':>8} {'Thr':>8} {'Dorm-F1':>9} {'Act-F1':>8} {'Note':<10}")
+        print(f"{'='*120}")
     else:
-        print(f"\n{'='*90}")
-        print(f"{'Rank':<5} {'Experiment ID':<45} {'F1':>8} {'P':>8} {'R':>8} {'AP':>8} {'Thr':>8}")
-        print(f"{'='*90}")
+        print(f"\n{'='*100}")
+        print(f"{'Rank':<5} {'Experiment ID':<45} {'F1':>8} {'P':>8} {'R':>8} {'AP':>8} {'Thr':>8} {'Note':<10}")
+        print(f"{'='*100}")
     for i, exp in enumerate(sorted_exps[:top_n], 1):
         m = exp["metrics"]
         f1 = m.get("f1", m.get("oof_f1", 0))
+        leaked = _is_leaked(exp)
+        note = "LEAKED" if leaked else ""
         row = (
             f"{i:<5} {exp['experiment_id']:<42} "
             f"{f1:>8.4f} {m.get('precision', 0):>8.4f} "
@@ -183,9 +270,13 @@ def print_leaderboard(top_n: int = 20) -> None:
             d_f1 = cm.get("dormant", {}).get("f1", float("nan"))
             a_f1 = cm.get("active", {}).get("f1", float("nan"))
             row += f" {d_f1:>9.4f} {a_f1:>8.4f}"
+        row += f" {note:<10}"
         print(row)
-    w = 110 if has_cohort else 90
+    w = 120 if has_cohort else 100
     print(f"{'='*w}\n")
-    best = sorted_exps[0]
-    print(f"Best: {best['experiment_id']} — F1={best['metrics'].get('f1', best['metrics'].get('oof_f1', 0)):.4f}")
-    print(f"  Config: {best['config']}\n")
+    best_valid = get_best_valid_experiment()
+    if best_valid:
+        bm = best_valid["metrics"]
+        print(f"Best VALID: {best_valid['experiment_id']} — F1={bm.get('f1', 0):.4f}")
+        print(f"  Config: {best_valid['config']}")
+        print(f"  git_sha: {best_valid.get('git_sha', 'unknown')}\n")
