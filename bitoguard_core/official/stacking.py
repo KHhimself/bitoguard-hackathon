@@ -369,7 +369,8 @@ def build_stacker_oof(
         valid_frame = frame[frame[fold_column] == fold_id].copy()
         train_frame = frame[frame[fold_column] != fold_id].copy()
         model = fit_logistic_stacker(train_frame, available_cols)
-        valid_frame["stacker_raw_probability"] = model.predict_proba(valid_frame[available_cols])[:, 1]
+        valid_X = valid_frame[available_cols].fillna(0.0).to_numpy()
+        valid_frame["stacker_raw_probability"] = model.predict_proba(valid_X)[:, 1]
         oof_rows.append(valid_frame)
     oof_frame = pd.concat(oof_rows, ignore_index=True).sort_values("user_id").reset_index(drop=True)
     final_model = fit_logistic_stacker(frame, available_cols)
