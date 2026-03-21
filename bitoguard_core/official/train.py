@@ -110,6 +110,9 @@ def run_transductive_oof_pipeline(
     base_a_feature_columns: list[str],
     base_b_feature_columns: list[str] | None = None,
     graph_max_epochs: int = 40,
+    catboost_params: dict | None = None,
+    use_negative_propagation: bool = False,
+    cs_restore_top_pct: float = 0.0,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     label_frame = _label_frame(dataset)
     assignments = iter_fold_assignments(split_frame, fold_column)
@@ -117,7 +120,10 @@ def run_transductive_oof_pipeline(
     fold_training_meta: list[dict[str, Any]] = []
     for fold_id, train_users, valid_users in assignments:
         fold_train_labels = label_frame[label_frame["user_id"].astype(int).isin(train_users)].copy()
-        transductive_features = build_transductive_feature_frame(graph, fold_train_labels)
+        transductive_features = build_transductive_feature_frame(
+            graph, fold_train_labels,
+            use_negative_propagation=use_negative_propagation,
+        )
         label_free_frame, with_transductive_frame = _prepare_base_frames(dataset, transductive_features)
 
         train_label_free = label_free_frame[label_free_frame["user_id"].astype(int).isin(train_users)].copy()
@@ -129,7 +135,7 @@ def run_transductive_oof_pipeline(
         _base_a_val_probs = []
         _base_a_models = []
         for _seed in _BASE_A_SEEDS:
-            _fit = fit_catboost(train_label_free, valid_label_free, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed)
+            _fit = fit_catboost(train_label_free, valid_label_free, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed, catboost_params=catboost_params)
             _base_a_val_probs.append(_fit.validation_probabilities)
             _base_a_models.append(_fit.model)
         base_a_fit = type(_fit)(
@@ -232,6 +238,7 @@ def run_transductive_oof_pipeline(
             graph, _cs_train_labels, _cs_base_probs,
             alpha_correct=0.5, alpha_smooth=0.5,
             n_correct_iter=50, n_smooth_iter=50,
+            restore_isolated_top_pct=cs_restore_top_pct,
         )
         _val_ids = valid_label_free["user_id"].astype(int).tolist()
         _cs_val_probs = np.array(
