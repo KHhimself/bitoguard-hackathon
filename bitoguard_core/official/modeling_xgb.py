@@ -36,24 +36,21 @@ def fit_xgboost(
     runtime_params = xgboost_runtime_params()
     p = params or {}
 
-    import os as _xgb_os
-    _xgb_fast = _xgb_os.environ.get("ABLATION_FAST", "0") == "1"
     model_kwargs = dict(
-        n_estimators=p.get("n_estimators", 800 if _xgb_fast else 1500),
-        max_depth=p.get("max_depth", 6 if _xgb_fast else 7),
-        learning_rate=p.get("learning_rate", 0.05),
-        subsample=p.get("subsample", 0.8),
-        sampling_method=p.get("sampling_method", "gradient_based"),  # GPU-optimised for imbalanced
-        colsample_bytree=p.get("colsample_bytree", 0.8),
-        reg_alpha=p.get("reg_alpha", 0.1),
-        reg_lambda=p.get("reg_lambda", 5.0),
-        min_child_weight=p.get("min_child_weight", 5),
+        n_estimators=p.get("n_estimators", 1500),  # HPO best
+        max_depth=p.get("max_depth", 6),  # HPO: was 7
+        learning_rate=p.get("learning_rate", 0.0585),  # HPO: was 0.05
+        subsample=p.get("subsample", 0.812),  # HPO: was 0.8
+        colsample_bytree=p.get("colsample_bytree", 0.881),  # HPO: was 0.8
+        reg_alpha=p.get("reg_alpha", 0.061),  # HPO: was 0.1
+        reg_lambda=p.get("reg_lambda", 5.707),  # HPO: was 5.0
+        min_child_weight=p.get("min_child_weight", 5.185),  # HPO: was 5
         scale_pos_weight=scale_pos_weight,
         objective="binary:logistic",
         eval_metric="logloss",
         random_state=p.get("random_state", random_seed),
         verbosity=0,
-        early_stopping_rounds=50 if _xgb_fast else 100,
+        early_stopping_rounds=100,
         **runtime_params,
     )
 
