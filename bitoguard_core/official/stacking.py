@@ -113,7 +113,7 @@ def _add_base_meta_features(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
     available = [c for c in _BASE_PROB_COLUMNS if c in frame.columns]
     if available:
-        frame["max_base_probability"] = frame[available].max(axis=1).fillna(0.0)
+        frame["max_base_probability"] = frame[available].max(axis=1)
         frame["std_base_probability"] = frame[available].std(axis=1).fillna(0.0)
     else:
         frame["max_base_probability"] = 0.0
@@ -278,10 +278,7 @@ def _predict_stacker(model: Any, frame: pd.DataFrame, feature_columns: list[str]
 
 def fit_logistic_stacker(frame: pd.DataFrame, feature_columns: list[str]) -> LogisticRegression:
     model = LogisticRegression(max_iter=1000, random_state=RANDOM_SEED)
-    labeled = frame.dropna(subset=["status"])
-    X = labeled[feature_columns].fillna(0.0).to_numpy()
-    y = labeled["status"].astype(int).to_numpy()
-    model.fit(X, y)
+    model.fit(frame[feature_columns], frame["status"].astype(int))
     return model
 
 
@@ -289,13 +286,7 @@ def _auto_select_best_stacker(
     frame: pd.DataFrame,
     fold_column: str,
 ) -> tuple[pd.DataFrame, Any]:
-    """Auto-select between BlendEnsemble and CatBoost stacker via OOF F1.
-
-    ABLATION_FAST: CatBoost stacker comparison skipped (env ABLATION_FAST=1).
-    BlendEnsemble is used directly to save ~25-30s per experiment.
-    Restore full comparison for final submission by unsetting ABLATION_FAST.
-    """
-    import os
+    """Auto-select between BlendEnsemble and CatBoost stacker via OOF F1."""
     stacker_cols = [c for c in STACKER_FEATURE_COLUMNS if c in frame.columns]
 
     blend_weights = tune_blend_weights(frame)
@@ -308,11 +299,6 @@ def _auto_select_best_stacker(
         labeled_blend["stacker_raw_probability"].to_numpy(),
     )
     print(f"[stacker] BlendEnsemble peak OOF F1={blend_f1:.4f}, weights={blend_weights}")
-
-    # Skip CatBoost stacker for ablation speed (saves ~25s per experiment).
-    if os.environ.get("ABLATION_FAST", "0") == "1":
-        print(f"[stacker] ABLATION_FAST: skipping CatBoost stacker, using BlendEnsemble")
-        return blend_frame, blend_model
 
     try:
         oof_rows: list[pd.DataFrame] = []
@@ -369,8 +355,7 @@ def build_stacker_oof(
         valid_frame = frame[frame[fold_column] == fold_id].copy()
         train_frame = frame[frame[fold_column] != fold_id].copy()
         model = fit_logistic_stacker(train_frame, available_cols)
-        valid_X = valid_frame[available_cols].fillna(0.0).to_numpy()
-        valid_frame["stacker_raw_probability"] = model.predict_proba(valid_X)[:, 1]
+        valid_frame["stacker_raw_probability"] = model.predict_proba(valid_frame[available_cols])[:, 1]
         oof_rows.append(valid_frame)
     oof_frame = pd.concat(oof_rows, ignore_index=True).sort_values("user_id").reset_index(drop=True)
     final_model = fit_logistic_stacker(frame, available_cols)

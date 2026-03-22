@@ -41,13 +41,10 @@ LABEL_FREE_EXCLUDED_COLUMNS = {
     "top_reason_codes",
 }
 
-import os as _os
 # Multi-seed ensembles — averaging reduces prediction variance by 1/sqrt(n).
-# Set ABLATION_FAST=1 to use reduced seeds for quick screening (~300s/exp saved).
-_FAST = _os.environ.get("ABLATION_FAST", "0") == "1"
-_BASE_A_SEEDS = [42, 52] if _FAST else [42, 52, 62, 72]    # CatBoost: 2 (fast) / 4 (full)
-_BASE_D_SEEDS = [42] if _FAST else [42, 123, 456]           # LightGBM: 1 (fast) / 3 (full)
-_BASE_E_SEEDS = [42] if _FAST else [42, 123]                # XGBoost:  1 (fast) / 2 (full)
+_BASE_A_SEEDS = [42, 52, 62, 72]  # CatBoost: 4 seeds
+_BASE_D_SEEDS = [42, 123, 456]    # LightGBM: 3 seeds
+_BASE_E_SEEDS = [42, 123]         # XGBoost: 2 seeds (slower)
 
 PRIMARY_GRAPH_MAX_EPOCHS = 40
 FINAL_GRAPH_MIN_EPOCHS = 10
@@ -68,7 +65,7 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
 
-    # Sequence features (20 cols)
+    # Sequence features (20 cols) — disable with DISABLE_SEQ_FEATURES=1
     try:
         import os as _sq; assert _sq.environ.get("DISABLE_SEQ_FEATURES", "0") != "1", "seq disabled"
         from official.sequence_features import build_sequence_features
@@ -82,7 +79,7 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     except Exception as _e:
         print(f"[_load_dataset] Sequence features skipped: {_e}", flush=True)
 
-    # Temporal features (23 cols)
+    # Temporal features (23 cols) — disable with DISABLE_TEMP_FEATURES=1
     try:
         import os as _tm; assert _tm.environ.get("DISABLE_TEMP_FEATURES", "0") != "1", "temporal disabled"
         from official.temporal_features import build_temporal_features
@@ -97,7 +94,7 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     except Exception as _e:
         print(f"[_load_dataset] Temporal features skipped: {_e}", flush=True)
 
-    # Community features (opt-in: ENABLE_COMMUNITY_FEATURES=1)
+    # Community features (opt-in: ENABLE_COMMUNITY_FEATURES=1) — CAUTION: leaks if not per-fold
     try:
         import os as _cm; assert _cm.environ.get("ENABLE_COMMUNITY_FEATURES", "0") == "1", "community disabled"
         from official.community_features import build_community_features
@@ -161,9 +158,6 @@ def run_transductive_oof_pipeline(
     base_a_feature_columns: list[str],
     base_b_feature_columns: list[str] | None = None,
     graph_max_epochs: int = 40,
-    catboost_params: dict | None = None,
-    use_negative_propagation: bool = False,
-    cs_restore_top_pct: float = 0.0,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     label_frame = _label_frame(dataset)
     assignments = iter_fold_assignments(split_frame, fold_column)
@@ -171,10 +165,7 @@ def run_transductive_oof_pipeline(
     fold_training_meta: list[dict[str, Any]] = []
     for fold_id, train_users, valid_users in assignments:
         fold_train_labels = label_frame[label_frame["user_id"].astype(int).isin(train_users)].copy()
-        transductive_features = build_transductive_feature_frame(
-            graph, fold_train_labels,
-            use_negative_propagation=use_negative_propagation,
-        )
+        transductive_features = build_transductive_feature_frame(graph, fold_train_labels)
         label_free_frame, with_transductive_frame = _prepare_base_frames(dataset, transductive_features)
 
         train_label_free = label_free_frame[label_free_frame["user_id"].astype(int).isin(train_users)].copy()
@@ -186,7 +177,7 @@ def run_transductive_oof_pipeline(
         _base_a_val_probs = []
         _base_a_models = []
         for _seed in _BASE_A_SEEDS:
-            _fit = fit_catboost(train_label_free, valid_label_free, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed, catboost_params=catboost_params)
+            _fit = fit_catboost(train_label_free, valid_label_free, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed)
             _base_a_val_probs.append(_fit.validation_probabilities)
             _base_a_models.append(_fit.model)
         base_a_fit = type(_fit)(
@@ -245,15 +236,14 @@ def run_transductive_oof_pipeline(
                 import warnings
                 warnings.warn(f"Base B fold {fold_id}: probabilities collapsed (mean={vb.mean():.6f}, max={vb.max():.6f})")
 
-        import os as _gnn_os
-        if _gnn_os.environ.get("SKIP_GNN", "0") == "1":
-            from official.graph_model import GraphModelFitResult as _GFR
-            graph_fit = _GFR(
-                model_state={"state_dict": {}, "metadata": {"user_ids": graph.user_ids, "max_epochs": 0, "hidden_dim": 128, "user_feature_columns": [], "best_epoch": 0}},
-                model_meta={"user_ids": graph.user_ids, "max_epochs": 0, "hidden_dim": 128, "user_feature_columns": [], "best_epoch": 0},
-                full_probabilities=np.zeros(len(graph.user_ids), dtype=np.float32),
-                validation_probabilities=np.zeros(len(valid_users)),
-            )
+        _skip_gnn = __import__("os").environ.get("SKIP_GNN", "0") == "1"
+        if _skip_gnn:
+            class _DummyGNN:
+                validation_probabilities = [0.0] * len(valid_users)
+                model_state = None
+                model_meta = {"best_epoch": 0, "best_val_ap": 0.0}
+            graph_fit = _DummyGNN()
+            print(f"[fold {fold_id}] GNN skipped (SKIP_GNN=1)", flush=True)
         else:
             graph_fit = train_graphsage_model(
                 graph,
@@ -263,12 +253,12 @@ def run_transductive_oof_pipeline(
                 max_epochs=graph_max_epochs,
                 hidden_dim=128,
             )
-        try:
-            import torch as _torch
-            if _torch.cuda.is_available():
-                _torch.cuda.empty_cache()
-        except Exception:
-            pass
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         # Correct-and-Smooth (C&S): graph post-processing on Base A OOF probs.
         _train_a_probs = np.mean(
@@ -285,29 +275,20 @@ def run_transductive_oof_pipeline(
         _all_labeled_ids = set(train_users) | set(valid_users)
         _unlabeled_frame = label_free_frame[~label_free_frame["user_id"].astype(int).isin(_all_labeled_ids)]
         if len(_unlabeled_frame) > 0:
-            import os as _uf_os
-            if _uf_os.environ.get("ABLATION_FAST", "0") == "1":
-                # Fast mode: single model for C&S init (smoothing averages out noise).
-                _unlabeled_a_probs = _base_a_models[0].predict_proba(_unlabeled_frame[base_a_feature_columns])[:, 1]
-            else:
-                _unlabeled_a_probs = np.mean(
-                    [m.predict_proba(_unlabeled_frame[base_a_feature_columns])[:, 1] for m in _base_a_models],
-                    axis=0,
-                )
+            _unlabeled_a_probs = np.mean(
+                [m.predict_proba(_unlabeled_frame[base_a_feature_columns])[:, 1] for m in _base_a_models],
+                axis=0,
+            )
             for _uid, _prob in zip(_unlabeled_frame["user_id"].astype(int), _unlabeled_a_probs):
                 _cs_base_probs[int(_uid)] = float(_prob)
         _cs_train_labels: dict[int, float] = dict(zip(
             fold_train_labels["user_id"].astype(int),
             fold_train_labels["status"].astype(float),
         ))
-        import os as _cs_os
-        _cs_fast = _cs_os.environ.get("ABLATION_FAST", "0") == "1"
         _cs_result = correct_and_smooth(
             graph, _cs_train_labels, _cs_base_probs,
             alpha_correct=0.5, alpha_smooth=0.5,
-            n_correct_iter=30 if _cs_fast else 50,
-            n_smooth_iter=30 if _cs_fast else 50,
-            restore_isolated_top_pct=cs_restore_top_pct,
+            n_correct_iter=50, n_smooth_iter=50,
         )
         _val_ids = valid_label_free["user_id"].astype(int).tolist()
         _cs_val_probs = np.array(
@@ -356,10 +337,7 @@ def train_official_model() -> dict[str, Any]:
     split_frame = split_frame.merge(primary_split[["user_id", "primary_fold"]], on="user_id", how="left")
     split_frame.to_parquet(artifacts["primary_split"], index=False)
 
-    _use_flow = __import__('os').environ.get('USE_FLOW_EDGES', '0') == '1'
-    graph = build_transductive_graph(dataset, use_flow_edges=_use_flow)
-    if _use_flow:
-        print("[train] flow graph edges ENABLED", flush=True)
+    graph = build_transductive_graph(dataset)
     base_a_feature_columns = _label_free_feature_columns(dataset)
     sample_transductive = build_transductive_feature_frame(graph, _label_frame(dataset))
     base_b_feature_columns = base_a_feature_columns + _transductive_feature_columns(sample_transductive)
@@ -397,15 +375,12 @@ def train_official_model() -> dict[str, Any]:
     base_e_final = _base_e_finals[0]
 
     graph_epochs = int(np.median([item["graph_best_epoch"] + 1 for item in fold_training_meta])) if fold_training_meta else 40
-    import os as _gnn_os2
-    if _gnn_os2.environ.get("SKIP_GNN", "0") == "1":
-        from official.graph_model import GraphModelFitResult as _GFR2
-        graph_final = _GFR2(
-            model_state={"state_dict": {}, "metadata": {"user_ids": graph.user_ids, "max_epochs": 0, "hidden_dim": 128, "user_feature_columns": [], "best_epoch": 0}},
-            model_meta={"user_ids": graph.user_ids, "max_epochs": 0, "hidden_dim": 128, "user_feature_columns": [], "best_epoch": 0},
-            full_probabilities=np.zeros(len(graph.user_ids), dtype=np.float32),
-            validation_probabilities=None,
-        )
+    _skip_gnn_final = __import__("os").environ.get("SKIP_GNN", "0") == "1"
+    if _skip_gnn_final:
+        class _DummyGNNFinal:
+            model_state = None
+        graph_final = _DummyGNNFinal()
+        print("[final] GNN skipped (SKIP_GNN=1)", flush=True)
     else:
         graph_final = train_graphsage_model(
             graph,
@@ -435,7 +410,8 @@ def train_official_model() -> dict[str, Any]:
         save_pickle(_fit.model, _path)
     for _fit, _path in zip(_base_e_finals, base_e_paths):
         save_pickle(_fit.model, _path)
-    save_graph_model(graph_final.model_state, graph_path)
+    if graph_final.model_state is not None:
+        save_graph_model(graph_final.model_state, graph_path)
     save_stacker_model(stacker_model, stacker_path)
 
     from official.stacking import BlendEnsemble as _BlendEnsemble
