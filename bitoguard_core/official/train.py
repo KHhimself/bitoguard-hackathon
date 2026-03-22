@@ -67,6 +67,54 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(graph_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
+
+    # Sequence features (20 cols)
+    try:
+        import os as _sq; assert _sq.environ.get("DISABLE_SEQ_FEATURES", "0") != "1", "seq disabled"
+        from official.sequence_features import build_sequence_features
+        seq_df = build_sequence_features(dataset)
+        if not seq_df.empty and len(seq_df.columns) > 1:
+            new_cols = [c for c in seq_df.columns if c != "user_id"]
+            dataset = dataset.merge(seq_df, on="user_id", how="left")
+            for col in new_cols:
+                dataset[col] = dataset[col].fillna(0.0)
+            print(f"[_load_dataset] Sequence features: {len(new_cols)} cols added", flush=True)
+    except Exception as _e:
+        print(f"[_load_dataset] Sequence features skipped: {_e}", flush=True)
+
+    # Temporal features (23 cols)
+    try:
+        import os as _tm; assert _tm.environ.get("DISABLE_TEMP_FEATURES", "0") != "1", "temporal disabled"
+        from official.temporal_features import build_temporal_features
+        temp_df = build_temporal_features(dataset)
+        if not temp_df.empty and len(temp_df.columns) > 1:
+            new_cols = [c for c in temp_df.columns if c != "user_id" and c not in dataset.columns]
+            if new_cols:
+                dataset = dataset.merge(temp_df[["user_id"] + new_cols], on="user_id", how="left")
+                for col in new_cols:
+                    dataset[col] = dataset[col].fillna(0.0)
+                print(f"[_load_dataset] Temporal features: {len(new_cols)} cols added", flush=True)
+    except Exception as _e:
+        print(f"[_load_dataset] Temporal features skipped: {_e}", flush=True)
+
+    # Community features (opt-in: ENABLE_COMMUNITY_FEATURES=1)
+    try:
+        import os as _cm; assert _cm.environ.get("ENABLE_COMMUNITY_FEATURES", "0") == "1", "community disabled"
+        from official.community_features import build_community_features
+        from official.graph_dataset import build_transductive_graph
+        _cm_graph = build_transductive_graph(dataset)
+        _cm_labels = _label_frame(dataset)
+        comm_df = build_community_features(_cm_graph, _cm_labels)
+        if not comm_df.empty and len(comm_df.columns) > 1:
+            new_cols = [c for c in comm_df.columns if c != "user_id" and c not in dataset.columns]
+            if new_cols:
+                dataset = dataset.merge(comm_df[["user_id"] + new_cols], on="user_id", how="left")
+                for col in new_cols:
+                    dataset[col] = dataset[col].fillna(0.0)
+                print(f"[_load_dataset] Community features: {len(new_cols)} cols added", flush=True)
+    except Exception as _e:
+        print(f"[_load_dataset] Community features skipped: {_e}", flush=True)
+
     return dataset
 
 
@@ -308,7 +356,10 @@ def train_official_model() -> dict[str, Any]:
     split_frame = split_frame.merge(primary_split[["user_id", "primary_fold"]], on="user_id", how="left")
     split_frame.to_parquet(artifacts["primary_split"], index=False)
 
-    graph = build_transductive_graph(dataset)
+    _use_flow = __import__('os').environ.get('USE_FLOW_EDGES', '0') == '1'
+    graph = build_transductive_graph(dataset, use_flow_edges=_use_flow)
+    if _use_flow:
+        print("[train] flow graph edges ENABLED", flush=True)
     base_a_feature_columns = _label_free_feature_columns(dataset)
     sample_transductive = build_transductive_feature_frame(graph, _label_frame(dataset))
     base_b_feature_columns = base_a_feature_columns + _transductive_feature_columns(sample_transductive)
