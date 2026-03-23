@@ -148,6 +148,16 @@ def build_strong_groups(
 
 
 def reserve_shadow_groups(group_index: pd.DataFrame) -> pd.DataFrame:
+    """Placeholder for future shadow-group isolation.
+
+    Currently a no-op: all groups are set to 'core_trainable'.
+    Shadow-group purging (holdout graph-connected clusters from all folds)
+    is not yet implemented. The secondary validation uses
+    StratifiedGroupKFold which provides weaker but still meaningful
+    group separation.
+
+    TODO: implement actual shadow-group reservation for stricter evaluation.
+    """
     result = group_index.copy()
     result["group_role"] = "core_trainable"
     result["shadow_split"] = None

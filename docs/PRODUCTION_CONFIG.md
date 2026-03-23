@@ -7,6 +7,16 @@
 - Threshold: 0.2071
 - Date: 2026-03-22
 
+## Evaluation Bias Note
+Primary F1=0.4418 includes in-sample selection bias from:
+- BlendEnsemble weight grid search on full OOF predictions (~+0.01)
+- Isotonic calibration + threshold selection on same OOF data
+
+**Secondary F1=0.4314 is the unbiased out-of-sample estimate.**
+Secondary uses StratifiedGroupKFold (graph-aware group splits) with
+the primary's calibrator and threshold applied without re-tuning.
+Primary-Secondary gap of +0.0104 F1 is within normal range.
+
 ## Configuration
 - Features: 158 base + 20 sequence + 23 temporal = 201 total
 - GNN: OFF (zero contribution, permanently disabled)

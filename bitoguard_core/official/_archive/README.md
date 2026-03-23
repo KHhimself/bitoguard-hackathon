@@ -32,3 +32,5 @@ but are NOT part of the production pipeline.
 | generate_submission.py | Submission | Competition submission | Not pipeline |
 | hpo_xgboost.py | HPO | XGBoost hyperparameter search | Results applied |
 | hpo_catboost.py | HPO | CatBoost hyperparameter search | Results applied |
+| OFFICIAL_EXPERIMENT_SUMMARY_20260317.md | Baseline results | F1=0.363 | Superseded by E15 (F1=0.4418) |
+| OFFICIAL_EXPERIMENT_SUMMARY_20260319.md | v46 results | F1=0.368 | Superseded by E15 (F1=0.4418) |

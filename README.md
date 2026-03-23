@@ -16,7 +16,7 @@ BitoGuard is a production-minded Anti-Money Laundering (AML) / fraud-risk detect
 |--------|-------------|-----------|
 | M1: Rules | 11 deterministic AML rules, severity-weighted scoring | `bitoguard_core/models/rule_engine.py` |
 | M2: Statistical | Peer-deviation features, cohort percentile ranks, rolling windows | `bitoguard_core/features/build_features.py` |
-| M3: Supervised | CatBoost + LightGBM stacker, 5-fold OOF, AUC 0.9495 | `bitoguard_core/models/stacker.py`, `bitoguard_core/models/score.py` |
+| M3: Supervised | Multi-model ensemble (CatBoost×4 + LightGBM×3 + XGBoost×2), BlendEnsemble stacker, 5-fold transductive CV, F1=0.4418 | `bitoguard_core/official/pipeline.py` |
 | M4: Anomaly | IsolationForest novelty detection, anomaly score + type | `bitoguard_core/models/anomaly.py` |
 | M5: Graph | NetworkX heterogeneous graph (IP/wallet/user), blacklist proximity | `bitoguard_core/features/graph_features.py` |
 | M6: Ops | SHAP case reports, incremental refresh, drift detection, AWS prep | `bitoguard_core/services/`, `pipeline/refresh_live.py` |
@@ -63,7 +63,7 @@ make test        # Run the backend pytest suite
 make sync        # Sync live BitoPro data
 make features    # Build feature snapshots + graph features
 make features-v2 # Build v2 feature snapshots (~155 columns per user)
-make train       # Train CatBoost + LightGBM stacker (v2 features)
+make train       # Train official transductive ensemble (see docs/PRODUCTION_CONFIG.md)
 make refresh     # Incremental refresh (watermark-bounded)
 make score       # Score latest snapshot → alerts
 make drift       # Feature distribution drift check
