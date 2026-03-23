@@ -14,7 +14,7 @@ from official.correct_and_smooth import correct_and_smooth
 from official.features import build_official_features
 from official.graph_dataset import TransductiveGraph, build_transductive_graph
 from official.graph_features import build_official_graph_features
-from official.graph_model import save_graph_model, train_graphsage_model
+from official.graph_model import save_graph_model
 from official.modeling import fit_catboost, fit_lgbm
 from official.modeling_xgb import fit_xgboost
 from official.rules import evaluate_official_rules
@@ -65,52 +65,27 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
 
-    # Sequence features (20 cols) — disable with DISABLE_SEQ_FEATURES=1
-    try:
-        import os as _sq; assert _sq.environ.get("DISABLE_SEQ_FEATURES", "0") != "1", "seq disabled"
-        from official.sequence_features import build_sequence_features
-        seq_df = build_sequence_features(dataset)
-        if not seq_df.empty and len(seq_df.columns) > 1:
-            new_cols = [c for c in seq_df.columns if c != "user_id"]
-            dataset = dataset.merge(seq_df, on="user_id", how="left")
+    # Sequence features (20 cols)
+    from official.sequence_features import build_sequence_features
+    seq_df = build_sequence_features(dataset)
+    if not seq_df.empty and len(seq_df.columns) > 1:
+        new_cols = [c for c in seq_df.columns if c != "user_id"]
+        dataset = dataset.merge(seq_df, on="user_id", how="left")
+        for col in new_cols:
+            dataset[col] = dataset[col].fillna(0.0)
+        print(f"[_load_dataset] Sequence features: {len(new_cols)} cols added", flush=True)
+
+    # Temporal features (23 cols)
+    from official.temporal_features import build_temporal_features
+    temp_df = build_temporal_features(dataset)
+    if not temp_df.empty and len(temp_df.columns) > 1:
+        new_cols = [c for c in temp_df.columns if c != "user_id" and c not in dataset.columns]
+        if new_cols:
+            dataset = dataset.merge(temp_df[["user_id"] + new_cols], on="user_id", how="left")
             for col in new_cols:
                 dataset[col] = dataset[col].fillna(0.0)
-            print(f"[_load_dataset] Sequence features: {len(new_cols)} cols added", flush=True)
-    except Exception as _e:
-        print(f"[_load_dataset] Sequence features skipped: {_e}", flush=True)
+            print(f"[_load_dataset] Temporal features: {len(new_cols)} cols added", flush=True)
 
-    # Temporal features (23 cols) — disable with DISABLE_TEMP_FEATURES=1
-    try:
-        import os as _tm; assert _tm.environ.get("DISABLE_TEMP_FEATURES", "0") != "1", "temporal disabled"
-        from official.temporal_features import build_temporal_features
-        temp_df = build_temporal_features(dataset)
-        if not temp_df.empty and len(temp_df.columns) > 1:
-            new_cols = [c for c in temp_df.columns if c != "user_id" and c not in dataset.columns]
-            if new_cols:
-                dataset = dataset.merge(temp_df[["user_id"] + new_cols], on="user_id", how="left")
-                for col in new_cols:
-                    dataset[col] = dataset[col].fillna(0.0)
-                print(f"[_load_dataset] Temporal features: {len(new_cols)} cols added", flush=True)
-    except Exception as _e:
-        print(f"[_load_dataset] Temporal features skipped: {_e}", flush=True)
-
-    # Community features (opt-in: ENABLE_COMMUNITY_FEATURES=1) — CAUTION: leaks if not per-fold
-    try:
-        import os as _cm; assert _cm.environ.get("ENABLE_COMMUNITY_FEATURES", "0") == "1", "community disabled"
-        from official.community_features import build_community_features
-        from official.graph_dataset import build_transductive_graph
-        _cm_graph = build_transductive_graph(dataset)
-        _cm_labels = _label_frame(dataset)
-        comm_df = build_community_features(_cm_graph, _cm_labels)
-        if not comm_df.empty and len(comm_df.columns) > 1:
-            new_cols = [c for c in comm_df.columns if c != "user_id" and c not in dataset.columns]
-            if new_cols:
-                dataset = dataset.merge(comm_df[["user_id"] + new_cols], on="user_id", how="left")
-                for col in new_cols:
-                    dataset[col] = dataset[col].fillna(0.0)
-                print(f"[_load_dataset] Community features: {len(new_cols)} cols added", flush=True)
-    except Exception as _e:
-        print(f"[_load_dataset] Community features skipped: {_e}", flush=True)
 
     return dataset
 
@@ -133,11 +108,6 @@ def _label_frame(dataset: pd.DataFrame) -> pd.DataFrame:
 def _label_free_feature_columns(dataset: pd.DataFrame) -> list[str]:
     non_null = {col for col in dataset.columns if not dataset[col].isna().all()}
     cols = [column for column in dataset.columns if column not in LABEL_FREE_EXCLUDED_COLUMNS and column in non_null]
-    _prune = __import__("os").environ.get("PRUNE_FEATURES", "")
-    if _prune:
-        _exclude = set(_prune.split(","))
-        cols = [c for c in cols if c not in _exclude]
-        print(f"[features] Pruned {len(_exclude)} features, {len(cols)} remaining", flush=True)
     return cols
 
 
@@ -180,22 +150,6 @@ def run_transductive_oof_pipeline(
         valid_transductive = with_transductive_frame[with_transductive_frame["user_id"].astype(int).isin(valid_users)].copy()
 
 
-        # ── Negative downsampling ──
-        import os as _ds_os
-        _ds_ratio = float(_ds_os.environ.get("NEG_DOWNSAMPLE_RATIO", "0"))
-        if _ds_ratio > 0:
-            _pos = train_label_free[train_label_free["status"].astype(int) == 1]
-            _neg = train_label_free[train_label_free["status"].astype(int) == 0]
-            _n_target = int(len(_pos) * _ds_ratio)
-            if _n_target < len(_neg):
-                _neg = _neg.sample(n=_n_target, random_state=42+fold_id)
-                train_label_free = pd.concat([_pos, _neg]).sort_values("user_id").reset_index(drop=True)
-                _ds_uids = set(train_label_free["user_id"].astype(int))
-                train_transductive = train_transductive[
-                    train_transductive["user_id"].astype(int).isin(_ds_uids)
-                ].copy()
-                print(f"  [fold {fold_id}] Downsampled: {len(_pos)}+ {len(_neg)}- (1:{_ds_ratio:.0f})", flush=True)
-
         # Multi-seed CatBoost ensemble for Base A (4 seeds, reduces variance ~50%).
         _base_a_val_probs = []
         _base_a_models = []
@@ -233,12 +187,10 @@ def run_transductive_oof_pipeline(
 
         # Multi-seed XGBoost ensemble for Base E (2 seeds).
         _base_e_val_probs = []
-        _base_e_models = []
         _base_e_fit = None
         for _seed_e in _BASE_E_SEEDS:
             _base_e_fit = fit_xgboost(train_label_free, valid_label_free, base_a_feature_columns, random_seed=_seed_e)
             _base_e_val_probs.append(_base_e_fit.validation_probabilities)
-            _base_e_models.append(_base_e_fit.model)
         base_e_fit = type(_base_e_fit)(
             model_name=_base_e_fit.model_name,
             model=_base_e_fit.model,
@@ -261,79 +213,33 @@ def run_transductive_oof_pipeline(
                 import warnings
                 warnings.warn(f"Base B fold {fold_id}: probabilities collapsed (mean={vb.mean():.6f}, max={vb.max():.6f})")
 
-        _skip_gnn = __import__("os").environ.get("SKIP_GNN", "0") == "1"
-        if _skip_gnn:
-            class _DummyGNN:
-                validation_probabilities = [0.0] * len(valid_users)
-                model_state = None
-                model_meta = {"best_epoch": 0, "best_val_ap": 0.0}
-            graph_fit = _DummyGNN()
-            print(f"[fold {fold_id}] GNN skipped (SKIP_GNN=1)", flush=True)
-        else:
-            graph_fit = train_graphsage_model(
-                graph,
-                label_frame=label_frame,
-                train_user_ids=train_users,
-                valid_user_ids=valid_users,
-                max_epochs=graph_max_epochs,
-                hidden_dim=128,
-            )
-            try:
-                import torch as _torch
-                if _torch.cuda.is_available():
-                    _torch.cuda.empty_cache()
-            except Exception:
-                pass
+        # GNN disabled — confirmed zero blend weight across all experiments
+        class _DummyGNN:
+            validation_probabilities = [0.0] * len(valid_users)
+            model_state = None
+            model_meta = {"best_epoch": 0, "best_val_ap": 0.0}
+        graph_fit = _DummyGNN()
 
-        # Correct-and-Smooth (C&S): graph post-processing.
-        # Always compute Base A val probs (needed for fold_frame regardless of C&S source)
+        # Correct-and-Smooth (C&S): graph post-processing on Base A predictions.
         _val_a_probs = np.asarray(base_a_fit.validation_probabilities, dtype=float)
-        # E27: CS_SOURCE selects which base model feeds C&S (default: base_a)
-        import os as _cs_os
-        _cs_source = _cs_os.environ.get("CS_SOURCE", "base_a")
-        _cs_alpha_c = float(_cs_os.environ.get("CS_ALPHA_CORRECT", "0.5"))
-        _cs_alpha_s = float(_cs_os.environ.get("CS_ALPHA_SMOOTH", "0.5"))
-        _cs_n_correct = int(_cs_os.environ.get("CS_N_CORRECT", "50"))
-        _cs_n_smooth = int(_cs_os.environ.get("CS_N_SMOOTH", "50"))
-
-        if _cs_source == "base_e":
-            from official.common import encode_frame as _cs_encode
-            _cs_enc_cols = base_e_fit.encoded_columns
-            _cs_x_train, _ = _cs_encode(train_label_free, base_a_feature_columns, reference_columns=_cs_enc_cols)
-            _cs_train_probs = np.mean(
-                [m.predict_proba(_cs_x_train)[:, 1] for m in _base_e_models],
-                axis=0,
-            )
-            _cs_val_probs_raw = np.asarray(base_e_fit.validation_probabilities, dtype=float)
-            if fold_id == 0:
-                print(f"  C&S source: Base E (XGBoost, {len(_base_e_models)} seeds)", flush=True)
-        else:
-            _cs_train_probs = np.mean(
-                [m.predict_proba(train_label_free[base_a_feature_columns])[:, 1] for m in _base_a_models],
-                axis=0,
-            )
-            _cs_val_probs_raw = np.asarray(base_a_fit.validation_probabilities, dtype=float)
+        _cs_train_probs = np.mean(
+            [m.predict_proba(train_label_free[base_a_feature_columns])[:, 1] for m in _base_a_models],
+            axis=0,
+        )
+        _cs_val_probs_raw = _val_a_probs
 
         _cs_base_probs: dict[int, float] = {}
         for _uid, _prob in zip(train_label_free["user_id"].astype(int), _cs_train_probs):
             _cs_base_probs[int(_uid)] = float(_prob)
         for _uid, _prob in zip(valid_label_free["user_id"].astype(int), _cs_val_probs_raw):
             _cs_base_probs[int(_uid)] = float(_prob)
-        # Include unlabeled users in C&S base_probs so their fraud signal propagates.
         _all_labeled_ids = set(train_users) | set(valid_users)
         _unlabeled_frame = label_free_frame[~label_free_frame["user_id"].astype(int).isin(_all_labeled_ids)]
         if len(_unlabeled_frame) > 0:
-            if _cs_source == "base_e":
-                _cs_x_unlabeled, _ = _cs_encode(_unlabeled_frame, base_a_feature_columns, reference_columns=_cs_enc_cols)
-                _unlabeled_cs_probs = np.mean(
-                    [m.predict_proba(_cs_x_unlabeled)[:, 1] for m in _base_e_models],
-                    axis=0,
-                )
-            else:
-                _unlabeled_cs_probs = np.mean(
-                    [m.predict_proba(_unlabeled_frame[base_a_feature_columns])[:, 1] for m in _base_a_models],
-                    axis=0,
-                )
+            _unlabeled_cs_probs = np.mean(
+                [m.predict_proba(_unlabeled_frame[base_a_feature_columns])[:, 1] for m in _base_a_models],
+                axis=0,
+            )
             for _uid, _prob in zip(_unlabeled_frame["user_id"].astype(int), _unlabeled_cs_probs):
                 _cs_base_probs[int(_uid)] = float(_prob)
         _cs_train_labels: dict[int, float] = dict(zip(
@@ -342,8 +248,8 @@ def run_transductive_oof_pipeline(
         ))
         _cs_result = correct_and_smooth(
             graph, _cs_train_labels, _cs_base_probs,
-            alpha_correct=_cs_alpha_c, alpha_smooth=_cs_alpha_s,
-            n_correct_iter=_cs_n_correct, n_smooth_iter=_cs_n_smooth,
+            alpha_correct=0.5, alpha_smooth=0.5,
+            n_correct_iter=50, n_smooth_iter=50,
         )
         _val_ids = valid_label_free["user_id"].astype(int).tolist()
         _cs_val_probs = np.array(
@@ -429,22 +335,10 @@ def train_official_model() -> dict[str, Any]:
     _base_e_finals = [fit_xgboost(train_label_free, None, base_a_feature_columns, random_seed=s) for s in _BASE_E_SEEDS]
     base_e_final = _base_e_finals[0]
 
-    graph_epochs = int(np.median([item["graph_best_epoch"] + 1 for item in fold_training_meta])) if fold_training_meta else 40
-    _skip_gnn_final = __import__("os").environ.get("SKIP_GNN", "0") == "1"
-    if _skip_gnn_final:
-        class _DummyGNNFinal:
-            model_state = None
-        graph_final = _DummyGNNFinal()
-        print("[final] GNN skipped (SKIP_GNN=1)", flush=True)
-    else:
-        graph_final = train_graphsage_model(
-            graph,
-            label_frame=label_frame,
-            train_user_ids=labeled_user_ids,
-            valid_user_ids=None,
-            max_epochs=max(FINAL_GRAPH_MIN_EPOCHS, graph_epochs),
-            hidden_dim=128,
-        )
+    # GNN disabled — confirmed zero blend weight across all experiments
+    class _DummyGNNFinal:
+        model_state = None
+    graph_final = _DummyGNNFinal()
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     base_a_paths = [paths.model_dir / f"official_catboost_base_a_seed{seed}_{timestamp}.pkl" for seed in _BASE_A_SEEDS]

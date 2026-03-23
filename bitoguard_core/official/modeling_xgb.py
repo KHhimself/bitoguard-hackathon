@@ -31,8 +31,7 @@ def fit_xgboost(
 
     positives = max(1, int(y_train.sum()))
     negatives = max(1, len(y_train) - positives)
-    _spw_cap = float(__import__("os").environ.get("XGB_SPW_CAP", "15.0"))
-    scale_pos_weight = min(float(negatives) / positives, _spw_cap)
+    scale_pos_weight = min(float(negatives) / positives, 15.0)
 
     runtime_params = xgboost_runtime_params()
     p = params or {}

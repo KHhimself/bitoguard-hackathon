@@ -92,3 +92,14 @@ mcp.json
 # Planning tool output (plans tracked in docs/superpowers/plans/, state dirs ignored)
 docs/superpowers/.sessions/
 docs/superpowers/.cache/
+
+# Training cache
+catboost_info/
+lightgbm_info/
+
+# HPO artifacts
+hpo_best_params*.json
+hpo_*_best.json
+
+# Claude config
+.claude/
