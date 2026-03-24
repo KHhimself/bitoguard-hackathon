@@ -2,10 +2,13 @@
 
 ## Final Results
 - Primary F1: 0.4418
-- Primary AP: 0.3842
-- Secondary F1: 0.4304
-- Threshold: 0.2071
-- Date: 2026-03-22
+- Primary AP: 0.3844
+- Primary Precision: 0.4339
+- Primary Recall: 0.4500
+- Secondary F1: 0.4314
+- Secondary AP: 0.3544
+- Threshold: 0.21
+- Date: 2026-03-23
 
 ## Evaluation Bias Note
 Primary F1=0.4418 includes in-sample selection bias from:
@@ -34,9 +37,11 @@ Primary-Secondary gap of +0.0104 F1 is within normal range.
 ## Reproduce
 ```bash
 cd bitoguard_core
-export BITOGUARD_AWS_EVENT_CLEAN_DIR=data/aws_event/clean
 PYTHONPATH=. python -m official.pipeline
 ```
+
+Data path defaults to `../data/aws_event/clean/` via `config.py`.
+Override with `BITOGUARD_AWS_EVENT_CLEAN_DIR` if needed.
 
 ## Experiment History
 See `official/_archive/` for all experiment code and logs.

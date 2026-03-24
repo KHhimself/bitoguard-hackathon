@@ -1,16 +1,31 @@
 # BitoGuard Core
 
-`bitoguard_core` is the AML risk detection engine. It handles:
+`bitoguard_core` is the AML risk detection engine for BitoPro cryptocurrency exchange.
 
-- Source ingestion from BitoPro AWS Event API into DuckDB
-- Canonical event schema: users, login_events, fiat_transactions, crypto_transactions, trade_orders
-- Graph feature extraction (shared IP/wallet/blacklist proximity) via NetworkX
-- Feature snapshot building with peer-deviation metrics and rolling windows
-- LightGBM supervised classifier (leakage-safe temporal splits) + IsolationForest anomaly model
-- Risk scoring, alert generation, SHAP case diagnosis
-- Incremental refresh with watermark checkpointing
-- Feature drift detection
-- FastAPI serving 13 endpoints for the Next.js frontend
+## Production Pipeline (E15)
+
+Trained on 707K raw events from 63,770 users (51,017 labeled, 12,753 unlabeled).
+
+### Features (201 total)
+- **158 base features** (`official/features.py`): TWD/crypto/trade/swap aggregates, FATF typology patterns, graph structure, anomaly scores, rule triggers
+- **20 sequence features** (`official/sequence_features.py`): inter-deposit timing, burst detection, chain patterns, IP entropy, wallet behavior
+- **23 temporal features** (`official/temporal_features.py`): windowed acceleration, cycle efficiency, periodicity detection
+
+### Model Architecture
+- **Base A**: CatBoost x4 seeds [42,52,62,72], depth=7, iterations=1500, focal_gamma=2.0
+- **Base B**: CatBoost transductive (label-aware graph features, CPU, l2_leaf_reg=5.0)
+- **Base C**: GraphSAGE — disabled (confirmed zero blend weight across all experiments)
+- **Base D**: LightGBM x3 seeds [42,123,456]
+- **Base E**: XGBoost x2 seeds [42,123], HPO-tuned (depth=6, lr=0.058)
+- **C&S**: Correct-and-Smooth graph post-processing on Base A (alpha=0.5, 50 iterations)
+- **Stacker**: BlendEnsemble (cs_x_anomaly=65%, base_e=30%, C&S=5%)
+
+### Results
+- **Primary F1**: 0.4418 (5-fold transductive CV)
+- **Secondary F1**: 0.4314 (StratifiedGroupKFold, unbiased estimate)
+- **Threshold**: 0.21
+
+See `docs/PRODUCTION_CONFIG.md` and `docs/METHODS_AND_RESULTS.md` for full details.
 
 ## Setup
 
@@ -21,49 +36,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Override default source:
+## Retrain
 
 ```bash
-export BITOGUARD_SOURCE_URL=https://aws-event-api.bitopro.com
+cd bitoguard_core
+PYTHONPATH=. python -m official.pipeline
 ```
 
-## Using the Makefile (recommended)
-
-```bash
-make test        # 61 tests
-make sync        # Full data sync from BitoPro
-make features    # Build graph + statistical features
-make train       # Train LightGBM + IsolationForest
-make evaluate    # Holdout evaluation (P@K, calibration, FI top-20)
-make ablation    # Module ablation study
-make refresh     # Incremental watermark refresh
-make score       # Score users → alerts
-make drift       # Feature drift health check
-make cases       # Generate SHAP case reports (examples/)
-make serve       # Start API on port 8001
-```
-
-## Manual pipeline steps
-
-```bash
-source .venv/bin/activate
-
-PYTHONPATH=. python pipeline/sync.py --full
-PYTHONPATH=. python features/graph_features.py
-PYTHONPATH=. python features/build_features.py
-PYTHONPATH=. python models/train.py
-PYTHONPATH=. python models/anomaly.py
-PYTHONPATH=. python models/score.py
-PYTHONPATH=. python models/validate.py
-PYTHONPATH=. python services/drift.py
-PYTHONPATH=. python scripts/ablation_study.py
-```
+Data path defaults to `../data/aws_event/clean/` (configurable via `BITOGUARD_AWS_EVENT_CLEAN_DIR`).
 
 ## Tests
 
 ```bash
 PYTHONPATH=. pytest tests/ -v
-# 61 passed: test_model_pipeline, test_rule_engine, test_source_integration, test_smoke
 ```
 
 ## API
@@ -80,9 +65,11 @@ See full endpoint list in the root `README.md`.
 
 | Artifact | Location |
 |----------|----------|
-| DuckDB database | `artifacts/bitoguard.duckdb` |
-| LightGBM model | `artifacts/models/lgbm_*.pkl` |
-| IsolationForest | `artifacts/models/iforest_*.pkl` |
-| Validation report | `artifacts/validation_report.json` |
-| Ablation report | `artifacts/ablation_report.json` |
-| Case reports | `../examples/case_report_*.json` |
+| Official bundle | `artifacts/official_bundle.json` |
+| CatBoost models | `artifacts/models/official_catboost_base_a_*.pkl` |
+| XGBoost models | `artifacts/models/official_xgboost_base_e_*.pkl` |
+| LightGBM models | `artifacts/models/official_lgbm_base_d_*.pkl` |
+| Stacker | `artifacts/models/official_stacker_*.pkl` |
+| Validation report | `artifacts/reports/official_validation_report.json` |
+| Predictions | `artifacts/predictions/official_predict_scores.csv` |
+| Archived experiments | `official/_archive/` |

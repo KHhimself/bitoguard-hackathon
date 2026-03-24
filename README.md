@@ -103,7 +103,8 @@ make docker-up
 | Graph recovery plan | `docs/GRAPH_RECOVERY_PLAN.md` |
 | ML pipeline summary | `docs/ML_PIPELINE_SUMMARY.md` |
 | SageMaker deployment guide | `docs/SAGEMAKER_DEPLOYMENT_GUIDE.md` |
-| Latest official experiment summary | `OFFICIAL_EXPERIMENT_SUMMARY_20260317.md` |
+| Production config | `docs/PRODUCTION_CONFIG.md` |
+| Methods and results | `docs/METHODS_AND_RESULTS.md` |
 
 ## Validation
 

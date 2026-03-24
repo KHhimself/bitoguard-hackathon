@@ -7,28 +7,28 @@
     "random_state": 42
   },
   "base_model_paths": {
-    "base_a_catboost": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_catboost_base_a_seed42_20260323T064328Z.pkl",
+    "base_a_catboost": "artifacts/models/official_catboost_base_a_seed42_20260323T064328Z.pkl",
     "base_a_catboost_seeds": [
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_catboost_base_a_seed42_20260323T064328Z.pkl",
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_catboost_base_a_seed52_20260323T064328Z.pkl",
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_catboost_base_a_seed62_20260323T064328Z.pkl",
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_catboost_base_a_seed72_20260323T064328Z.pkl"
+      "artifacts/models/official_catboost_base_a_seed42_20260323T064328Z.pkl",
+      "artifacts/models/official_catboost_base_a_seed52_20260323T064328Z.pkl",
+      "artifacts/models/official_catboost_base_a_seed62_20260323T064328Z.pkl",
+      "artifacts/models/official_catboost_base_a_seed72_20260323T064328Z.pkl"
     ],
-    "base_b_catboost": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_catboost_base_b_20260323T064328Z.pkl",
-    "base_d_lgbm": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_lgbm_base_d_seed42_20260323T064328Z.pkl",
+    "base_b_catboost": "artifacts/models/official_catboost_base_b_20260323T064328Z.pkl",
+    "base_d_lgbm": "artifacts/models/official_lgbm_base_d_seed42_20260323T064328Z.pkl",
     "base_d_lgbm_seeds": [
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_lgbm_base_d_seed42_20260323T064328Z.pkl",
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_lgbm_base_d_seed123_20260323T064328Z.pkl",
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_lgbm_base_d_seed456_20260323T064328Z.pkl"
+      "artifacts/models/official_lgbm_base_d_seed42_20260323T064328Z.pkl",
+      "artifacts/models/official_lgbm_base_d_seed123_20260323T064328Z.pkl",
+      "artifacts/models/official_lgbm_base_d_seed456_20260323T064328Z.pkl"
     ],
-    "base_e_xgboost": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_xgboost_base_e_seed42_20260323T064328Z.pkl",
+    "base_e_xgboost": "artifacts/models/official_xgboost_base_e_seed42_20260323T064328Z.pkl",
     "base_e_xgboost_seeds": [
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_xgboost_base_e_seed42_20260323T064328Z.pkl",
-      "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_xgboost_base_e_seed123_20260323T064328Z.pkl"
+      "artifacts/models/official_xgboost_base_e_seed42_20260323T064328Z.pkl",
+      "artifacts/models/official_xgboost_base_e_seed123_20260323T064328Z.pkl"
     ]
   },
   "graph_model_path": "models/official_graphsage_20260323T064328Z.pt",
-  "stacker_path": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_stacker_20260323T064328Z.pkl",
+  "stacker_path": "artifacts/models/official_stacker_20260323T064328Z.pkl",
   "stacker_feature_columns": [
     "base_a_probability",
     "base_c_s_probability",
@@ -1417,7 +1417,7 @@
     ]
   },
   "secondary_stress_summary": {
-    "secondary_oof_predictions_path": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/official_features/official_secondary_oof_predictions_full.parquet",
+    "secondary_oof_predictions_path": "artifacts/official_features/official_secondary_oof_predictions_full.parquet",
     "secondary_group_stress_metrics": {
       "precision": 0.38737864077669903,
       "recall": 0.4865853658536585,
@@ -2635,7 +2635,7 @@
       },
       "beta": 1.0
     },
-    "calibrator_path": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_stacker_calibrator_isotonic_20260323T064516Z.pkl",
+    "calibrator_path": "artifacts/models/official_stacker_calibrator_isotonic_20260323T064516Z.pkl",
     "candidates": [
       {
         "method": "raw",
@@ -11891,8 +11891,8 @@
     "mode": "secondary_only",
     "reason": "strict_group_split_used_only_for_robustness"
   },
-  "oof_predictions_path": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/official_features/official_oof_predictions.parquet",
-  "primary_split_path": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/official_features/official_primary_split.parquet",
-  "primary_labeled_split_path": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/official_features/official_primary_transductive_split_full.parquet",
-  "model_meta_path": "/home/user/bitoguard-hackathon/bitoguard_core/artifacts/models/official_transductive_20260323T064328Z.json"
+  "oof_predictions_path": "artifacts/official_features/official_oof_predictions.parquet",
+  "primary_split_path": "artifacts/official_features/official_primary_split.parquet",
+  "primary_labeled_split_path": "artifacts/official_features/official_primary_transductive_split_full.parquet",
+  "model_meta_path": "artifacts/models/official_transductive_20260323T064328Z.json"
 }

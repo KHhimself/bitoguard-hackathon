@@ -177,7 +177,7 @@ The official pipeline is a self-contained offline training system designed for t
 - `modeling.py`: `fit_catboost()` and `fit_lgbm()` wrappers with auto-balanced class weights.
 - `bundle.py`: `official_bundle.json` persistence — stores all model paths, feature columns, calibrator, threshold, and validation metadata.
 
-**Latest results** (from `OFFICIAL_EXPERIMENT_SUMMARY_20260317.md`): Primary F1=0.363 at threshold=0.1492, isotonic calibration, AP=0.284. Secondary group-stress F1=0.351.
+**Latest results** (E15): Primary F1=0.4418 at threshold=0.21, isotonic calibration, AP=0.384. Secondary group-stress F1=0.4314. See `docs/PRODUCTION_CONFIG.md`.
 
 ### Transductive V1 Pipeline: `bitoguard_core/transductive_v1/`
 
