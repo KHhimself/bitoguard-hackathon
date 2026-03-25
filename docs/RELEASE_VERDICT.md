@@ -44,7 +44,7 @@ BitoGuard is a well-architected, honestly documented AML screening system that w
 - **AWS deployment** has never been executed (placeholder values remain in infrastructure templates).
 - **Frontend functionality** was not tested (build artifacts present but UI not exercised).
 - **Live API performance benchmarks** claimed in RUNBOOK_AWS.md were not independently verified.
-- **Mock API** (`bitoguard_mock_api/`) was not inspected or tested.
+- **Mock API** was removed from the repository (no longer applicable).
 
 ---
 

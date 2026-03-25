@@ -279,7 +279,6 @@ Output: JSON report comparing the two most recent feature snapshots. Flags featu
 | BITOGUARD_DB_PATH | `bitoguard_core/artifacts/bitoguard.duckdb` | DuckDB file path |
 | BITOGUARD_ARTIFACT_DIR | `bitoguard_core/artifacts/` | Model and report artifacts |
 | BITOGUARD_SOURCE_URL | `https://aws-event-api.bitopro.com` | Data source URL |
-| BITOGUARD_ORACLE_DIR | `../bitoguard_sim_output` | Local CSV oracle fallback |
 | BITOGUARD_LABEL_SOURCE | `hidden_suspicious_label` | Label column name |
 | BITOGUARD_INTERNAL_API_PORT | `8001` | Backend API port |
 

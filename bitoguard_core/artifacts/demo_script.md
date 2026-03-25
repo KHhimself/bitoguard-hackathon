@@ -2,9 +2,8 @@
 
 ## 1. 啟動服務
 
-1. 啟動 `bitoguard_mock_api`：展示這是外部 Swagger source simulator
-2. 啟動 `bitoguard_core` internal API（port 8001）
-3. 啟動 Next.js frontend（port 3000）
+1. 啟動 `bitoguard_core` internal API（port 8001）
+2. 啟動 Next.js frontend（port 3000）
 
 ## 2. 同步資料
 
