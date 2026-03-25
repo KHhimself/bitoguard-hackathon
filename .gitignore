@@ -49,6 +49,8 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+tfplan
+*.tf.bak
 
 # IDE
 .vscode/
@@ -56,7 +58,10 @@ override.tf.json
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
+Thumbs.db
 
 # Logs
 *.log
@@ -67,14 +72,33 @@ logs/
 *.duckdb
 *.duckdb.wal
 
-# Artifacts
+# Model & pipeline artifacts (reproducible via `make train`)
 artifacts/
 *.pkl
+*.joblib
+*.lgbm
+*.pt
 *.json.gz
 
-# OS
-.DS_Store
-Thumbs.db
+# Data files (too large for git; fetch via scripts/)
+*.parquet
+data/
+bitoguard_core/data/
+
+# Lambda build artifacts (rebuild from source)
+infra/aws/lambda/*.zip
+
+# Experiment runs (ephemeral)
+bitoguard_core/runs/
+
+# Training cache
+catboost_info/
+lightgbm_info/
+bitoguard_core/catboost_info/
+
+# HPO artifacts
+hpo_best_params*.json
+hpo_*_best.json
 
 # Secrets
 .env
@@ -86,20 +110,11 @@ secrets.yml
 .kiro/
 .serena/
 .superpowers/
-bitoguard_core/catboost_info/
+.claude/
+.mcp.json
+.postman.json
 mcp.json
 
 # Planning tool output (plans tracked in docs/superpowers/plans/, state dirs ignored)
 docs/superpowers/.sessions/
 docs/superpowers/.cache/
-
-# Training cache
-catboost_info/
-lightgbm_info/
-
-# HPO artifacts
-hpo_best_params*.json
-hpo_*_best.json
-
-# Claude config
-.claude/
