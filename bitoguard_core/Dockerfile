@@ -16,7 +16,6 @@ RUN python -m pip install --upgrade pip \
 
 COPY bitoguard_core /app/bitoguard_core
 RUN pip install .
-COPY bitoguard_sim_output /app/bitoguard_sim_output
 
 EXPOSE 8001
 

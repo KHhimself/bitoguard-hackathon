@@ -8,7 +8,7 @@ import pandas as pd
 
 from config import load_settings
 
-# ── Shared with transductive_v1 (single source of truth) ─────────────────────
+# ── Shared utilities ────────────────────────────────────────────────────────
 from shared.aws_common import (  # noqa: F401  (re-exported for backward compat)
     RANDOM_SEED,
     EVENT_TIME_COLUMNS,

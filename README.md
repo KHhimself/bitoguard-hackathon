@@ -1,13 +1,12 @@
 # BitoGuard — Exchange-Centric AML Risk Detection System
 
-BitoGuard is a production-minded Anti-Money Laundering (AML) / fraud-risk detection system built over the BitoPro AWS-event data model. The repository now includes the main backend/frontend stack, competition-aligned official pipelines, a mock upstream API, and sample or simulated datasets for offline development.
+BitoGuard is a production-minded Anti-Money Laundering (AML) / fraud-risk detection system built over the BitoPro AWS-event data model. The repository includes the main backend/frontend stack and the competition-aligned official pipeline.
 
 ## Repo Layout
 
-- `bitoguard_core/`: main Python backend, training and scoring code, official experiment pipeline in `official/`, transductive research pipeline in `transductive_v1/`, and tracked outputs in `artifacts/`
+- `bitoguard_core/`: main Python backend, training and scoring code, official pipeline in `official/`, and tracked outputs in `artifacts/`
 - `bitoguard_frontend/`: Next.js App Router frontend for alerts, graph, and model operations
-- `bitoguard_mock_api/`: read-only FastAPI mock of the upstream source API backed by `bitoguard_sim_output/`
-- `bitoguard_sample_output/`, `bitoguard_sim_output/`, `bitoguard_simulator/`, `data/aws_event/`: sample, simulated, and organizer-supplied offline data assets
+- `data/aws_event/`: organizer-supplied offline data assets
 - `infra/aws/`, `deploy/`, `docs/`: Terraform, deployment scripts, and runbooks
 
 ## Architecture Overview
@@ -46,7 +45,6 @@ docker compose up --build
 |---------|------|-------------|
 | `bitoguard_core` | 8001 | FastAPI — pipeline, model, alerts, graph, metrics |
 | `bitoguard_frontend` | 3000 | Next.js — alerts dashboard, model ops, graph explorer |
-| `bitoguard_mock_api` | 8000 | Optional FastAPI mock of the upstream source API for offline testing |
 
 ### Frontend
 
@@ -111,7 +109,6 @@ make docker-up
 ```
 make test-quick
 cd bitoguard_frontend && npm run lint && npm run build
-cd bitoguard_mock_api && python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && pytest
 ```
 
 ## AWS Deployment

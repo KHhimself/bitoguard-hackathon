@@ -55,8 +55,6 @@ python ../scripts/clean_aws_event_data.py --raw-dir data/aws_event/raw --output-
 # Step 3: Run the official pipeline (features → train → validate → score)
 PYTHONPATH=. python -m official.pipeline
 
-# Or run transductive_v1 pipeline:
-PYTHONPATH=. python -m transductive_v1.pipeline
 ```
 
 ### Linting
@@ -110,10 +108,9 @@ aws-event-api.bitopro.com
       ├─ Enum decoding: integer codes → string labels (kind_label, side_label, protocol_label, etc.)
       └─ Derived columns: amount_twd_equiv, kyc_level, days_email_to_level1, etc.
   └─ official/ pipeline  → artifacts/official_features/, artifacts/models/, artifacts/predictions/
-  └─ transductive_v1/    → artifacts/transductive_v1/
 ```
 
-The `clean_aws_event_data.py` script produces a `user_index.parquet` that joins `user_info`, `train_label`, and `predict_label` into a single cohort-assignment table. Both `official/` and `transductive_v1/` pipelines read from the `clean/` directory via their respective `common.load_clean_table()`.
+The `clean_aws_event_data.py` script produces a `user_index.parquet` that joins `user_info`, `train_label`, and `predict_label` into a single cohort-assignment table. The `official/` pipeline reads from the `clean/` directory via `common.load_clean_table()`.
 
 ### Storage: DuckDB Schemas
 
@@ -127,7 +124,7 @@ DuckDB allows **only one writer at a time**. If you see lock errors, check for o
 
 ### Backend: `bitoguard_core/`
 
-- **`config.py`**: All settings via environment variables. `load_settings()` is the central config entry point. Also provides `aws_event_raw_dir` and `aws_event_clean_dir` paths used by the official and transductive pipelines.
+- **`config.py`**: All settings via environment variables. `load_settings()` is the central config entry point. Also provides `aws_event_raw_dir` and `aws_event_clean_dir` paths used by the official pipeline.
 - **`api/main.py`**: Single FastAPI app — all endpoints in one file (~14k lines), serving 13 routes.
 - **`db/store.py`**: `DuckDBStore` — thin wrapper for queries and DataFrame fetching.
 - **`models/common.py`**: Shared utilities: `feature_columns`, `encode_features`, `load_lgbm`, `load_iforest`.
@@ -179,28 +176,6 @@ The official pipeline is a self-contained offline training system designed for t
 
 **Latest results** (E15): Primary F1=0.4418 at threshold=0.21, isotonic calibration, AP=0.384. Secondary group-stress F1=0.4314. See `docs/PRODUCTION_CONFIG.md`.
 
-### Transductive V1 Pipeline: `bitoguard_core/transductive_v1/`
-
-A competition-oriented MVP pipeline separate from `official/`. Artifacts write to `bitoguard_core/artifacts/transductive_v1/`. Entry point: `transductive_v1/pipeline.py`.
-
-**Key differences from `official/`**:
-- No GNN (Base C / GraphSAGE) — uses only 2 CatBoost branches (Base A label-free, Base B label-aware).
-- Graph features come from a `GraphStore` that builds projected user-user edges (relation, wallet, IP) with typed weights and structural features (component sizes, degree centrality, shared-user counts) but does not train a GNN.
-- Label-aware features use direct BFS distances, hop counts, PPR (6 iterations), entity reputation features, and a `graph_risk_score` composite.
-- Stacker includes 7 candidate features: `[base_a_prob, base_b_prob, graph_risk_score, rule_score, anomaly_score, projected_component_log_size, connected_flag]`.
-- Calibration jointly selects both a calibrator and a "decision rule" (which may be a threshold or other rule type) via `decision_rule.py`.
-- Training uses subprocess-per-fold isolation (`fold_worker.py`) for memory management.
-- Secondary validation uses `secondary_validation.py` with `StratifiedGroupKFold`.
-- Scoring blends probabilities as `0.76*submission + 0.14*anomaly + 0.10*rule` (vs official's `0.72/0.16/0.12`).
-
-### Mock API: `bitoguard_mock_api/`
-
-Read-only FastAPI server that serves simulator-generated pseudo data through `/v1/` list endpoints. Loads CSV files from `bitoguard_sim_output/` (configurable via `BITOGUARD_DATA_DIR`). Provides 11 paginated endpoints: users, login-events, fiat-transactions, trade-orders, crypto-transactions, known-blacklist-users, devices, user-device-links, bank-accounts, user-bank-links, crypto-wallets. Supports `start_time`/`end_time` filtering and standard pagination. Run with `uvicorn app.main:app --port 8000`.
-
-### Simulator: `bitoguard_simulator/`
-
-Transaction simulator (`bitoguard_transaction_simulator.py`) that generates synthetic exchange data with injected AML scenarios (mule_quick_out, fan_in_hub, shared_device_ring, blacklist_2hop_chain). Produces 14 CSV files including `entity_edges.csv` for graph models. Run with `python bitoguard_simulator/bitoguard_transaction_simulator.py --n-users 1200 --days 30 --seed 42 --output-dir bitoguard_sim_output`.
-
 ### Frontend: `bitoguard_frontend/`
 
 Next.js 16 App Router (React 19, TypeScript, Tailwind CSS v4).
@@ -228,7 +203,7 @@ Graph features are **split**: most are disabled by default due to known data qua
 
 `UNSAFE_GRAPH_FEATURES` and `PLACEHOLDER_DEVICE_IDS` are defined in `config.py` and enforced in `features/graph_features.py`.
 
-**Note**: The `official/` and `transductive_v1/` pipelines use their own graph feature implementations that handle the trust boundary differently — they cap entity fan-out at configurable thresholds (`MAX_IP_ENTITY_USERS=200`, `MAX_WALLET_ENTITY_USERS=200` in `official/graph_features.py`) rather than using the binary trusted-only flag.
+**Note**: The `official/` pipeline uses its own graph feature implementation that caps entity fan-out at configurable thresholds (`MAX_IP_ENTITY_USERS=200`, `MAX_WALLET_ENTITY_USERS=200` in `official/graph_features.py`) rather than using the binary trusted-only flag.
 
 ### Key Environment Variables
 
@@ -241,7 +216,6 @@ Graph features are **split**: most are disabled by default due to known data qua
 | `BITOGUARD_GRAPH_FEATURES_TRUSTED_ONLY` | `true` | Disable unsafe graph features |
 | `BITOGUARD_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated CORS origins |
 | `BITOGUARD_API_KEY` | (unset) | API key for X-API-Key header auth; unset = auth disabled |
-| `BITOGUARD_DATA_DIR` | `bitoguard_sim_output/` | Mock API data directory |
 | `BITOGUARD_MODEL_BACKEND` | `legacy` | Model backend for scoring: `"legacy"` (DuckDB stacker) or `"official"` (pre-computed official pipeline scores) |
 
 ### Artifacts
@@ -258,7 +232,6 @@ Stored in `bitoguard_core/artifacts/`:
 - `models/official_stacker_*.pkl` — official LR stacker
 - `reports/official_validation_report.json` — official primary + secondary validation
 - `predictions/official_predict_scores.{parquet,csv}` — final scored predictions
-- `transductive_v1/` — separate artifact tree (features/, models/, reports/, predictions/, bundle.json)
 
 ### Test Suite Structure
 
@@ -275,8 +248,7 @@ tests/
 ├── test_store.py                 # DuckDBStore read/write tests
 ├── test_anomaly_features.py      # Anomaly feature pipeline tests
 ├── test_iforest_ablation.py      # IsolationForest ablation tests
-├── test_official_pipeline.py     # Official pipeline integration tests
-└── test_transductive_v1_pipeline.py  # Transductive v1 pipeline tests
+└── test_official_pipeline.py     # Official pipeline integration tests
 ```
 
 Tests run against fixture data (no live API calls required by default).

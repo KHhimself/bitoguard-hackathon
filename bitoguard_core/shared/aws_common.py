@@ -1,13 +1,8 @@
 # bitoguard_core/shared/aws_common.py
-"""Shared utilities for official/ and transductive_v1/ pipelines.
+"""Shared utilities for the official pipeline.
 
-Both pipelines process the same raw AWS event data (BitoPro) and share
-identical data-loading helpers, serialization utilities, and feature-encoding
-primitives. This module is the single source of truth for those components.
-
-Re-exported from:
-  official/common.py        (was duplicated)
-  transductive_v1/common.py (was duplicated)
+Data-loading helpers, serialization utilities, and feature-encoding
+primitives used by the official/ pipeline.
 """
 from __future__ import annotations
 
