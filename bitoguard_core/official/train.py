@@ -261,47 +261,50 @@ def run_transductive_oof_pipeline(
         base_b_fit = fit_catboost(train_transductive, valid_transductive, resolved_base_b_columns, focal_gamma=2.0, catboost_params=_base_b_params)
         _log_fold(fold_id, f"Base B done ({time.time()-_t1:.0f}s)")
 
-        # Base D + Base E 平行（彼此獨立，可同時跑）
+        # Base D → Base E 依序（避免同時太多 model 造成 OOM），各自內部平行多 seed
         _t2 = time.time()
-        _log_fold(fold_id, f"Base D ({len(_BASE_D_SEEDS)} seeds) + Base E ({len(_BASE_E_SEEDS)} seeds) parallel")
         _base_d_val_probs = [None] * len(_BASE_D_SEEDS)
         _base_e_val_probs = [None] * len(_BASE_E_SEEDS)
         _base_e_models = [None] * len(_BASE_E_SEEDS)
 
-        if _PARALLEL_SEEDS:
+        _log_fold(fold_id, f"Base D: {len(_BASE_D_SEEDS)} LightGBM seeds")
+        if _PARALLEL_SEEDS and len(_BASE_D_SEEDS) > 1:
             from concurrent.futures import ThreadPoolExecutor
-            _de_workers = len(_BASE_D_SEEDS) + len(_BASE_E_SEEDS)
-            _de_wt = _worker_threads(_de_workers)
-            os.environ["BITOGUARD_CPU_THREADS"] = str(_de_wt)
+            os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_D_SEEDS)))
             _hp_fn.cache_clear()
-
             def _fit_lgbm_seed(idx_seed):
                 idx, seed = idx_seed
-                return ("d", idx, fit_lgbm(train_label_free, valid_label_free, base_a_feature_columns, random_seed=seed))
-            def _fit_xgb_seed(idx_seed):
-                idx, seed = idx_seed
-                return ("e", idx, fit_xgboost(train_label_free, valid_label_free, base_a_feature_columns, random_seed=seed))
-
-            with ThreadPoolExecutor(max_workers=_de_workers) as pool:
-                futs = []
-                futs.extend(pool.map(_fit_lgbm_seed, enumerate(_BASE_D_SEEDS)))
-                futs.extend(pool.map(_fit_xgb_seed, enumerate(_BASE_E_SEEDS)))
-                for tag, idx, result in futs:
-                    if tag == "d":
-                        _base_d_val_probs[idx] = result.validation_probabilities
-                        _base_d_fit = result
-                    else:
-                        _base_e_val_probs[idx] = result.validation_probabilities
-                        _base_e_models[idx] = result.model
-                        _base_e_fit = result
+                return idx, fit_lgbm(train_label_free, valid_label_free, base_a_feature_columns, random_seed=seed)
+            with ThreadPoolExecutor(max_workers=len(_BASE_D_SEEDS)) as pool:
+                for idx, result in pool.map(_fit_lgbm_seed, enumerate(_BASE_D_SEEDS)):
+                    _base_d_val_probs[idx] = result.validation_probabilities
+                    _base_d_fit = result
         else:
             for idx, _seed_d in enumerate(_BASE_D_SEEDS):
                 _base_d_fit = fit_lgbm(train_label_free, valid_label_free, base_a_feature_columns, random_seed=_seed_d)
                 _base_d_val_probs[idx] = _base_d_fit.validation_probabilities
+        _log_fold(fold_id, f"Base D done ({time.time()-_t2:.0f}s)")
+
+        _t3 = time.time()
+        _log_fold(fold_id, f"Base E: {len(_BASE_E_SEEDS)} XGBoost seeds")
+        if _PARALLEL_SEEDS and len(_BASE_E_SEEDS) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_E_SEEDS)))
+            _hp_fn.cache_clear()
+            def _fit_xgb_seed(idx_seed):
+                idx, seed = idx_seed
+                return idx, fit_xgboost(train_label_free, valid_label_free, base_a_feature_columns, random_seed=seed)
+            with ThreadPoolExecutor(max_workers=len(_BASE_E_SEEDS)) as pool:
+                for idx, result in pool.map(_fit_xgb_seed, enumerate(_BASE_E_SEEDS)):
+                    _base_e_val_probs[idx] = result.validation_probabilities
+                    _base_e_models[idx] = result.model
+                    _base_e_fit = result
+        else:
             for idx, _seed_e in enumerate(_BASE_E_SEEDS):
                 _base_e_fit = fit_xgboost(train_label_free, valid_label_free, base_a_feature_columns, random_seed=_seed_e)
                 _base_e_val_probs[idx] = _base_e_fit.validation_probabilities
                 _base_e_models[idx] = _base_e_fit.model
+        _log_fold(fold_id, f"Base E done ({time.time()-_t3:.0f}s)")
 
         # Restore full thread count
         os.environ["BITOGUARD_CPU_THREADS"] = str(os.cpu_count() or 32)
@@ -520,20 +523,26 @@ def train_official_model() -> dict[str, Any]:
     base_b_final = fit_catboost(train_transductive, None, base_b_feature_columns, focal_gamma=2.0, catboost_params=_base_b_final_params)
     print(f"[final] Base B done ({time.time()-_final_t0:.0f}s)", flush=True)
 
-    # Base D + E 平行
-    _de_final_workers = len(_BASE_D_SEEDS) + len(_BASE_E_SEEDS)
-    os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(_de_final_workers))
-    _hp_fn.cache_clear()
-
-    if _PARALLEL_SEEDS:
+    # Base D → Base E 依序（避免 OOM），各自內部平行
+    if _PARALLEL_SEEDS and len(_BASE_D_SEEDS) > 1:
         from concurrent.futures import ThreadPoolExecutor
+        os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_D_SEEDS)))
+        _hp_fn.cache_clear()
         def _final_lgbm(s): return fit_lgbm(train_label_free, None, base_a_feature_columns, random_seed=s)
-        def _final_xgb(s): return fit_xgboost(train_label_free, None, base_a_feature_columns, random_seed=s)
-        with ThreadPoolExecutor(max_workers=_de_final_workers) as pool:
+        with ThreadPoolExecutor(max_workers=len(_BASE_D_SEEDS)) as pool:
             _base_d_finals = list(pool.map(_final_lgbm, _BASE_D_SEEDS))
-            _base_e_finals = list(pool.map(_final_xgb, _BASE_E_SEEDS))
     else:
         _base_d_finals = [fit_lgbm(train_label_free, None, base_a_feature_columns, random_seed=s) for s in _BASE_D_SEEDS]
+    print(f"[final] Base D done ({time.time()-_final_t0:.0f}s)", flush=True)
+
+    if _PARALLEL_SEEDS and len(_BASE_E_SEEDS) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_E_SEEDS)))
+        _hp_fn.cache_clear()
+        def _final_xgb(s): return fit_xgboost(train_label_free, None, base_a_feature_columns, random_seed=s)
+        with ThreadPoolExecutor(max_workers=len(_BASE_E_SEEDS)) as pool:
+            _base_e_finals = list(pool.map(_final_xgb, _BASE_E_SEEDS))
+    else:
         _base_e_finals = [fit_xgboost(train_label_free, None, base_a_feature_columns, random_seed=s) for s in _BASE_E_SEEDS]
     base_d_final = _base_d_finals[0]
     base_e_final = _base_e_finals[0]
