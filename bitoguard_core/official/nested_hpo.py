@@ -93,6 +93,9 @@ HPO_SEED = 42
 FINAL_SEEDS_A = [42, 52, 62, 72]
 FINAL_SEEDS_D = [42, 123, 456]
 FINAL_SEEDS_E = [42, 123]
+INNER_OOF_SELECTION_SEEDS_A = [HPO_SEED]
+INNER_OOF_SELECTION_SEEDS_D = [HPO_SEED]
+INNER_OOF_SELECTION_SEEDS_E = [HPO_SEED]
 
 GPU_STREAM_CPU_THREADS = 4
 CPU_STREAM_THREADS = 20
@@ -429,12 +432,16 @@ def _cs_from_base_a_fits(
     return base_a_valid, cs_valid
 
 
-def _cs_from_base_a(model, train_f, valid_f, feature_columns, graph, train_labels_dict):
-    """Compute C&S from Base A model predictions."""
+def _cs_from_base_a(model, train_f, valid_f, feature_columns, graph, train_labels_dict,
+                     unlabeled_f=None):
+    """Compute C&S from Base A model predictions (includes unlabeled for propagation)."""
     base_a_train = model.predict_proba(train_f[feature_columns])[:, 1]
     base_a_valid = model.predict_proba(valid_f[feature_columns])[:, 1]
     cs_base = dict(zip(train_f["user_id"].astype(int).tolist(), base_a_train.tolist()))
     cs_base.update(zip(valid_f["user_id"].astype(int).tolist(), base_a_valid.tolist()))
+    if unlabeled_f is not None and not unlabeled_f.empty:
+        ul_probs = model.predict_proba(unlabeled_f[feature_columns])[:, 1]
+        cs_base.update(zip(unlabeled_f["user_id"].astype(int).tolist(), ul_probs.tolist()))
     cs_result = correct_and_smooth(
         graph, train_labels_dict, cs_base,
         alpha_correct=0.5, alpha_smooth=0.5,
@@ -601,6 +608,7 @@ def _catboost_objective(
     graph: TransductiveGraph,
     feature_columns: list[str],
     runtime_cb: dict,
+    dataset: pd.DataFrame | None = None,
 ) -> float:
     """Train Base A with trial params → recompute C&S → blend F1."""
     from catboost import CatBoostClassifier
@@ -639,8 +647,13 @@ def _catboost_objective(
             except Exception:
                 return 0.0
 
+        unlabeled_f = None
+        if dataset is not None:
+            inner_ids = set(train_f["user_id"].astype(int)) | set(valid_f["user_id"].astype(int))
+            unlabeled_f = dataset[~dataset["user_id"].astype(int).isin(inner_ids)]
         base_a_valid, cs_valid = _cs_from_base_a(
-            model, train_f, valid_f, feature_columns, graph, fd["train_labels_dict"]
+            model, train_f, valid_f, feature_columns, graph, fd["train_labels_dict"],
+            unlabeled_f=unlabeled_f,
         )
         oof = _assemble_oof(
             valid_f, base_a_valid, cs_valid,
@@ -756,7 +769,7 @@ def _lgbm_objective(
 
 # ── Stage 2: Dual-Stream HPO ─────────────────────────────────────────────────
 
-def _gpu_stream(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials):
+def _gpu_stream(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials, dataset=None):
     """GPU: CatBoost HPO → XGBoost HPO (sequential, sharing GPU)."""
     runtime_cb = catboost_runtime_params()
     runtime_xgb = xgboost_runtime_params()
@@ -772,6 +785,7 @@ def _gpu_stream(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fo
     cb_study.optimize(
         lambda trial: _catboost_objective(
             trial, inner_folds_data, cb_cache, graph, feature_columns, runtime_cb,
+            dataset=dataset,
         ),
         n_trials=n_trials,
     )
@@ -835,12 +849,12 @@ def _cpu_stream(de_cache, inner_folds_data, fold_output, n_trials):
     return dict(lgbm_study.best_params)
 
 
-def _run_stage2(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials):
+def _run_stage2(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials, dataset=None):
     _log("Stage 2: Dual-stream HPO starting...")
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=2) as pool:
         gpu_f = pool.submit(_gpu_stream, cb_cache, de_cache, inner_folds_data,
-                            graph, feature_columns, fold_output, n_trials)
+                            graph, feature_columns, fold_output, n_trials, dataset=dataset)
         cpu_f = pool.submit(_cpu_stream, de_cache, inner_folds_data, fold_output, n_trials)
         best_cb, best_xgb = gpu_f.result()
         best_lgbm = cpu_f.result()
@@ -896,10 +910,10 @@ def _run_stage3(
 
         inner_other = dataset[~dataset["user_id"].astype(int).isin(inner_ids)].copy()
 
-        # Base A × multi-seed
+        # Base A × single-seed (selection OOF only)
         ba_fits = [
             _fit_catboost_with_params(tr_lf, va_lf, feature_columns, cb_hpo.copy(), s)
-            for s in FINAL_SEEDS_A
+            for s in INNER_OOF_SELECTION_SEEDS_A
         ]
         ba_v, cs_v = _cs_from_base_a_fits(
             ba_fits,
@@ -926,17 +940,17 @@ def _run_stage3(
             thread_count=CPU_STREAM_THREADS,
         )
 
-        # Base D × multi-seed (CPU only)
+        # Base D × single-seed (selection OOF only, CPU)
         bd_fits = [
             _fit_lgbm_cpu(tr_lf, va_lf, feature_columns, best_lgbm.copy(), s, n_jobs=CPU_STREAM_THREADS)
-            for s in FINAL_SEEDS_D
+            for s in INNER_OOF_SELECTION_SEEDS_D
         ]
         bd_v = _mean_validation_probabilities(bd_fits)
 
-        # Base E × multi-seed
+        # Base E × single-seed (selection OOF only)
         be_fits = [
             fit_xgboost(tr_lf, va_lf, feature_columns, params=best_xgb, random_seed=s)
-            for s in FINAL_SEEDS_E
+            for s in INNER_OOF_SELECTION_SEEDS_E
         ]
         be_v = _mean_validation_probabilities(be_fits)
 
@@ -1076,9 +1090,6 @@ def run_outer_fold(
 ) -> dict[str, Any]:
     t_start = time.time()
     fold_output = _fold_dir(outer_fold)
-    if n_inner_folds != N_INNER_FOLDS:
-        _log(f"Requested inner_folds={n_inner_folds}; using {N_INNER_FOLDS} for this runner")
-        n_inner_folds = N_INNER_FOLDS
     _log(f"{'=' * 60}")
     _log(f"Outer fold {outer_fold} starting")
     _log(f"{'=' * 60}")
@@ -1110,6 +1121,7 @@ def run_outer_fold(
     t2 = time.time()
     best_cb, best_lgbm, best_xgb = _run_stage2(
         cb_cache, de_cache, inner_folds, graph, feature_columns, fold_output, n_trials,
+        dataset=dataset,
     )
     s2 = time.time() - t2
     save_json({"catboost": best_cb, "lightgbm": best_lgbm, "xgboost": best_xgb},
