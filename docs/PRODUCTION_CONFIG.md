@@ -1,48 +1,44 @@
-# Production Pipeline (E15)
-
-## Final Results
-- Primary F1: 0.4418
-- Primary AP: 0.3844
-- Primary Precision: 0.4339
-- Primary Recall: 0.4500
-- Secondary F1: 0.4314
-- Secondary AP: 0.3544
-- Threshold: 0.21
-- Date: 2026-03-23
-
-## Evaluation Bias Note
-Primary F1=0.4418 includes in-sample selection bias from:
-- BlendEnsemble weight grid search on full OOF predictions (~+0.01)
-- Isotonic calibration + threshold selection on same OOF data
-
-**Secondary F1=0.4314 is the unbiased out-of-sample estimate.**
-Secondary uses StratifiedGroupKFold (graph-aware group splits) with
-the primary's calibrator and threshold applied without re-tuning.
-Primary-Secondary gap of +0.0104 F1 is within normal range.
-
-## Configuration
-- Features: 158 base + 20 sequence + 23 temporal = 201 total
-- GNN: OFF (zero contribution, permanently disabled)
-- C&S: alpha=0.5/0.5, 50+50 iterations, on Base A
+# BitoGuard Production Configuration
 
 ## Model Architecture
-- Base A: CatBoost x4 seeds [42,52,62,72], depth=7, iterations=1500
-- Base B: CatBoost transductive (1 seed, CPU, l2_leaf_reg=5.0)
-- Base C: GraphSAGE (disabled, dummy zeros)
-- Base D: LightGBM x3 seeds [42,123,456]
-- Base E: XGBoost x2 seeds [42,123], depth=6, lr=0.058 (HPO optimized)
-- C&S: Correct-and-Smooth on Base A
-- Stacker: BlendEnsemble (cs_x_anomaly=65%, base_e=30%, C&S=5%)
 
-## Reproduce
-```bash
-cd bitoguard_core
-PYTHONPATH=. python -m official.pipeline
-```
+The production model is a stacked ensemble combining multiple base models:
 
-Data path defaults to `../data/aws_event/clean/` via `config.py`.
-Override with `BITOGUARD_AWS_EVENT_CLEAN_DIR` if needed.
+- Base A: CatBoost (multi-seed, 4 seeds)
+- Base B: CatBoost transductive (with graph features)
+- Base C: GraphSAGE GNN (DISABLED - replaced by dummy zeros, confirmed zero blend weight)
+- Base C&S: Correct-and-Smooth graph post-processing (ACTIVE)
+- Base D: LightGBM (multi-seed, 3 seeds)
+- Base E: XGBoost (multi-seed, 2 seeds)
 
-## Experiment History
-See `official/_archive/` for all experiment code and logs.
-Full experiment log: 20+ experiments, baseline 0.363 -> 0.4418 (+21.7%)
+Note: 4 active branches (Base A, B, C&S, D, E). GraphSAGE GNN exists in architecture but is disabled.
+
+## Validation Protocol
+
+### Primary Validation
+- Protocol: StratifiedKFold (5 folds, user-level)
+- Mode: Transductive label masking
+- Purpose: Development metrics
+
+### Secondary Validation (Group-Stress)
+- Protocol: StratifiedGroupKFold (5 folds, group-level)
+- Groups: Strong groups via IP/wallet/relation edges
+- Purpose: Group-aware practical estimate
+- Note: Blend weights are re-tuned on secondary OOF via tune_blend_weights(), introducing some in-sample bias
+
+### Honest Validation (NEW)
+- Protocol: Inner-fold selection
+- All selection steps (blend weights, calibration, threshold) performed inside each fold's training portion
+- Purpose: Unbiased out-of-sample estimate
+- Eliminates in-sample selection bias from reported metrics
+
+## Performance Metrics
+
+Validation results will be updated after running the honest evaluation pipeline.
+
+## Configuration
+
+- Random seed: 42
+- CV folds: 5
+- Calibration: Isotonic (selected via cross-validation)
+- Threshold: F1-optimized with bootstrap validation

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +17,7 @@ from official.correct_and_smooth import correct_and_smooth
 from official.features import build_official_features
 from official.graph_dataset import TransductiveGraph, build_transductive_graph
 from official.graph_features import build_official_graph_features
-from official.graph_model import save_graph_model
+from official.graph_model import save_graph_model, train_graphsage_model
 from official.modeling import fit_catboost, fit_lgbm
 from official.modeling_xgb import fit_xgboost
 from official.rules import evaluate_official_rules
@@ -49,6 +52,20 @@ _BASE_E_SEEDS = [42, 123]         # XGBoost: 2 seeds (slower)
 PRIMARY_GRAPH_MAX_EPOCHS = 40
 FINAL_GRAPH_MIN_EPOCHS = 10
 
+# ── 平行化控制 ────────────────────────────────────────────────────────────────
+# 同 fold 內多 seed 平行訓練。設 PARALLEL_SEEDS=0 關閉平行化。
+_PARALLEL_SEEDS = int(os.environ.get("PARALLEL_SEEDS", "1"))
+
+# 每個 worker 的 thread 數 = total_cores / max_workers
+def _worker_threads(n_workers: int) -> int:
+    total = os.cpu_count() or 1
+    return max(1, total // max(1, n_workers))
+
+
+def _log_fold(fold_id: int, msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"  [fold {fold_id} {ts}] {msg}", flush=True)
+
 
 def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     feature_path = feature_output_path("official_user_features", cutoff_tag)
@@ -65,27 +82,52 @@ def _load_dataset(cutoff_tag: str = "full") -> pd.DataFrame:
     dataset = dataset.merge(pd.read_parquet(anomaly_path), on=["user_id", "snapshot_cutoff_at", "snapshot_cutoff_tag"], how="left")
     dataset = dataset.merge(evaluate_official_rules(dataset), on="user_id", how="left")
 
-    # Sequence features (20 cols)
-    from official.sequence_features import build_sequence_features
-    seq_df = build_sequence_features(dataset)
-    if not seq_df.empty and len(seq_df.columns) > 1:
-        new_cols = [c for c in seq_df.columns if c != "user_id"]
-        dataset = dataset.merge(seq_df, on="user_id", how="left")
-        for col in new_cols:
-            dataset[col] = dataset[col].fillna(0.0)
-        print(f"[_load_dataset] Sequence features: {len(new_cols)} cols added", flush=True)
-
-    # Temporal features (23 cols)
-    from official.temporal_features import build_temporal_features
-    temp_df = build_temporal_features(dataset)
-    if not temp_df.empty and len(temp_df.columns) > 1:
-        new_cols = [c for c in temp_df.columns if c != "user_id" and c not in dataset.columns]
-        if new_cols:
-            dataset = dataset.merge(temp_df[["user_id"] + new_cols], on="user_id", how="left")
+    # Sequence features (20 cols) — disable with DISABLE_SEQ_FEATURES=1
+    try:
+        import os as _sq; assert _sq.environ.get("DISABLE_SEQ_FEATURES", "0") != "1", "seq disabled"
+        from official.sequence_features import build_sequence_features
+        seq_df = build_sequence_features(dataset)
+        if not seq_df.empty and len(seq_df.columns) > 1:
+            new_cols = [c for c in seq_df.columns if c != "user_id"]
+            dataset = dataset.merge(seq_df, on="user_id", how="left")
             for col in new_cols:
                 dataset[col] = dataset[col].fillna(0.0)
-            print(f"[_load_dataset] Temporal features: {len(new_cols)} cols added", flush=True)
+            print(f"[_load_dataset] Sequence features: {len(new_cols)} cols added", flush=True)
+    except Exception as _e:
+        print(f"[_load_dataset] Sequence features skipped: {_e}", flush=True)
 
+    # Temporal features (23 cols) — disable with DISABLE_TEMP_FEATURES=1
+    try:
+        import os as _tm; assert _tm.environ.get("DISABLE_TEMP_FEATURES", "0") != "1", "temporal disabled"
+        from official.temporal_features import build_temporal_features
+        temp_df = build_temporal_features(dataset)
+        if not temp_df.empty and len(temp_df.columns) > 1:
+            new_cols = [c for c in temp_df.columns if c != "user_id" and c not in dataset.columns]
+            if new_cols:
+                dataset = dataset.merge(temp_df[["user_id"] + new_cols], on="user_id", how="left")
+                for col in new_cols:
+                    dataset[col] = dataset[col].fillna(0.0)
+                print(f"[_load_dataset] Temporal features: {len(new_cols)} cols added", flush=True)
+    except Exception as _e:
+        print(f"[_load_dataset] Temporal features skipped: {_e}", flush=True)
+
+    # Community features (opt-in: ENABLE_COMMUNITY_FEATURES=1) — CAUTION: leaks if not per-fold
+    try:
+        import os as _cm; assert _cm.environ.get("ENABLE_COMMUNITY_FEATURES", "0") == "1", "community disabled"
+        from official.community_features import build_community_features
+        from official.graph_dataset import build_transductive_graph
+        _cm_graph = build_transductive_graph(dataset)
+        _cm_labels = _label_frame(dataset)
+        comm_df = build_community_features(_cm_graph, _cm_labels)
+        if not comm_df.empty and len(comm_df.columns) > 1:
+            new_cols = [c for c in comm_df.columns if c != "user_id" and c not in dataset.columns]
+            if new_cols:
+                dataset = dataset.merge(comm_df[["user_id"] + new_cols], on="user_id", how="left")
+                for col in new_cols:
+                    dataset[col] = dataset[col].fillna(0.0)
+                print(f"[_load_dataset] Community features: {len(new_cols)} cols added", flush=True)
+    except Exception as _e:
+        print(f"[_load_dataset] Community features skipped: {_e}", flush=True)
 
     return dataset
 
@@ -108,6 +150,11 @@ def _label_frame(dataset: pd.DataFrame) -> pd.DataFrame:
 def _label_free_feature_columns(dataset: pd.DataFrame) -> list[str]:
     non_null = {col for col in dataset.columns if not dataset[col].isna().all()}
     cols = [column for column in dataset.columns if column not in LABEL_FREE_EXCLUDED_COLUMNS and column in non_null]
+    _prune = __import__("os").environ.get("PRUNE_FEATURES", "")
+    if _prune:
+        _exclude = set(_prune.split(","))
+        cols = [c for c in cols if c not in _exclude]
+        print(f"[features] Pruned {len(_exclude)} features, {len(cols)} remaining", flush=True)
     return cols
 
 
@@ -150,13 +197,54 @@ def run_transductive_oof_pipeline(
         valid_transductive = with_transductive_frame[with_transductive_frame["user_id"].astype(int).isin(valid_users)].copy()
 
 
-        # Multi-seed CatBoost ensemble for Base A (4 seeds, reduces variance ~50%).
-        _base_a_val_probs = []
-        _base_a_models = []
-        for _seed in _BASE_A_SEEDS:
-            _fit = fit_catboost(train_label_free, valid_label_free, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed)
-            _base_a_val_probs.append(_fit.validation_probabilities)
-            _base_a_models.append(_fit.model)
+        # ── Negative downsampling ──
+        import os as _ds_os
+        _ds_ratio = float(_ds_os.environ.get("NEG_DOWNSAMPLE_RATIO", "0"))
+        if _ds_ratio > 0:
+            _pos = train_label_free[train_label_free["status"].astype(int) == 1]
+            _neg = train_label_free[train_label_free["status"].astype(int) == 0]
+            _n_target = int(len(_pos) * _ds_ratio)
+            if _n_target < len(_neg):
+                _neg = _neg.sample(n=_n_target, random_state=42+fold_id)
+                train_label_free = pd.concat([_pos, _neg]).sort_values("user_id").reset_index(drop=True)
+                _ds_uids = set(train_label_free["user_id"].astype(int))
+                train_transductive = train_transductive[
+                    train_transductive["user_id"].astype(int).isin(_ds_uids)
+                ].copy()
+                print(f"  [fold {fold_id}] Downsampled: {len(_pos)}+ {len(_neg)}- (1:{_ds_ratio:.0f})", flush=True)
+
+        # ── 平行化 multi-seed 訓練 ──────────────────────────────────────────
+        # 同 fold 內所有獨立的 seed 同時訓練，大幅減少 wall time。
+        # 每個 worker 用 total_cores/n_workers 個 thread，避免過度競爭。
+        _fold_t0 = time.time()
+        _n_workers = len(_BASE_A_SEEDS) if _PARALLEL_SEEDS else 1
+        _wt = _worker_threads(_n_workers)
+        _log_fold(fold_id, f"Base A: {len(_BASE_A_SEEDS)} seeds ({'parallel' if _PARALLEL_SEEDS else 'seq'}, {_wt} threads/worker)")
+
+        # Override thread count for this fold's workers
+        os.environ["BITOGUARD_CPU_THREADS"] = str(_wt)
+        # Clear hardware_profile cache so it picks up new thread count
+        from hardware import hardware_profile as _hp_fn
+        _hp_fn.cache_clear()
+
+        _base_a_val_probs = [None] * len(_BASE_A_SEEDS)
+        _base_a_models = [None] * len(_BASE_A_SEEDS)
+        if _PARALLEL_SEEDS and len(_BASE_A_SEEDS) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            def _fit_cb_seed(idx_seed):
+                idx, seed = idx_seed
+                r = fit_catboost(train_label_free, valid_label_free, base_a_feature_columns, focal_gamma=2.0, random_seed=seed)
+                return idx, r
+            with ThreadPoolExecutor(max_workers=len(_BASE_A_SEEDS)) as pool:
+                for idx, result in pool.map(_fit_cb_seed, enumerate(_BASE_A_SEEDS)):
+                    _base_a_val_probs[idx] = result.validation_probabilities
+                    _base_a_models[idx] = result.model
+                    _fit = result
+        else:
+            for idx, _seed in enumerate(_BASE_A_SEEDS):
+                _fit = fit_catboost(train_label_free, valid_label_free, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed)
+                _base_a_val_probs[idx] = _fit.validation_probabilities
+                _base_a_models[idx] = _fit.model
         base_a_fit = type(_fit)(
             model_name=_fit.model_name,
             model=_base_a_models[0],
@@ -165,17 +253,63 @@ def run_transductive_oof_pipeline(
             cat_features=_fit.cat_features,
             validation_probabilities=np.mean(_base_a_val_probs, axis=0).tolist(),
         )
+        _log_fold(fold_id, f"Base A done ({time.time()-_fold_t0:.0f}s)")
 
+        _t1 = time.time()
         resolved_base_b_columns = base_b_feature_columns or [column for column in train_transductive.columns if column != "user_id"]
         _base_b_params = {"task_type": "CPU", "l2_leaf_reg": 5.0}
         base_b_fit = fit_catboost(train_transductive, valid_transductive, resolved_base_b_columns, focal_gamma=2.0, catboost_params=_base_b_params)
+        _log_fold(fold_id, f"Base B done ({time.time()-_t1:.0f}s)")
 
-        # Multi-seed LightGBM ensemble for Base D (3 seeds).
-        _base_d_val_probs = []
-        _base_d_fit = None
-        for _seed_d in _BASE_D_SEEDS:
-            _base_d_fit = fit_lgbm(train_label_free, valid_label_free, base_a_feature_columns, random_seed=_seed_d)
-            _base_d_val_probs.append(_base_d_fit.validation_probabilities)
+        # Base D → Base E 依序（避免同時太多 model 造成 OOM），各自內部平行多 seed
+        _t2 = time.time()
+        _base_d_val_probs = [None] * len(_BASE_D_SEEDS)
+        _base_e_val_probs = [None] * len(_BASE_E_SEEDS)
+        _base_e_models = [None] * len(_BASE_E_SEEDS)
+
+        _log_fold(fold_id, f"Base D: {len(_BASE_D_SEEDS)} LightGBM seeds")
+        if _PARALLEL_SEEDS and len(_BASE_D_SEEDS) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_D_SEEDS)))
+            _hp_fn.cache_clear()
+            def _fit_lgbm_seed(idx_seed):
+                idx, seed = idx_seed
+                return idx, fit_lgbm(train_label_free, valid_label_free, base_a_feature_columns, random_seed=seed)
+            with ThreadPoolExecutor(max_workers=len(_BASE_D_SEEDS)) as pool:
+                for idx, result in pool.map(_fit_lgbm_seed, enumerate(_BASE_D_SEEDS)):
+                    _base_d_val_probs[idx] = result.validation_probabilities
+                    _base_d_fit = result
+        else:
+            for idx, _seed_d in enumerate(_BASE_D_SEEDS):
+                _base_d_fit = fit_lgbm(train_label_free, valid_label_free, base_a_feature_columns, random_seed=_seed_d)
+                _base_d_val_probs[idx] = _base_d_fit.validation_probabilities
+        _log_fold(fold_id, f"Base D done ({time.time()-_t2:.0f}s)")
+
+        _t3 = time.time()
+        _log_fold(fold_id, f"Base E: {len(_BASE_E_SEEDS)} XGBoost seeds")
+        if _PARALLEL_SEEDS and len(_BASE_E_SEEDS) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_E_SEEDS)))
+            _hp_fn.cache_clear()
+            def _fit_xgb_seed(idx_seed):
+                idx, seed = idx_seed
+                return idx, fit_xgboost(train_label_free, valid_label_free, base_a_feature_columns, random_seed=seed)
+            with ThreadPoolExecutor(max_workers=len(_BASE_E_SEEDS)) as pool:
+                for idx, result in pool.map(_fit_xgb_seed, enumerate(_BASE_E_SEEDS)):
+                    _base_e_val_probs[idx] = result.validation_probabilities
+                    _base_e_models[idx] = result.model
+                    _base_e_fit = result
+        else:
+            for idx, _seed_e in enumerate(_BASE_E_SEEDS):
+                _base_e_fit = fit_xgboost(train_label_free, valid_label_free, base_a_feature_columns, random_seed=_seed_e)
+                _base_e_val_probs[idx] = _base_e_fit.validation_probabilities
+                _base_e_models[idx] = _base_e_fit.model
+        _log_fold(fold_id, f"Base E done ({time.time()-_t3:.0f}s)")
+
+        # Restore full thread count
+        os.environ["BITOGUARD_CPU_THREADS"] = str(os.cpu_count() or 32)
+        _hp_fn.cache_clear()
+
         base_d_fit = type(_base_d_fit)(
             model_name=_base_d_fit.model_name,
             model=_base_d_fit.model,
@@ -184,13 +318,6 @@ def run_transductive_oof_pipeline(
             cat_features=_base_d_fit.cat_features,
             validation_probabilities=np.mean(_base_d_val_probs, axis=0).tolist(),
         )
-
-        # Multi-seed XGBoost ensemble for Base E (2 seeds).
-        _base_e_val_probs = []
-        _base_e_fit = None
-        for _seed_e in _BASE_E_SEEDS:
-            _base_e_fit = fit_xgboost(train_label_free, valid_label_free, base_a_feature_columns, random_seed=_seed_e)
-            _base_e_val_probs.append(_base_e_fit.validation_probabilities)
         base_e_fit = type(_base_e_fit)(
             model_name=_base_e_fit.model_name,
             model=_base_e_fit.model,
@@ -199,6 +326,7 @@ def run_transductive_oof_pipeline(
             cat_features=_base_e_fit.cat_features,
             validation_probabilities=np.mean(_base_e_val_probs, axis=0).tolist(),
         )
+        _log_fold(fold_id, f"Base D+E done ({time.time()-_t2:.0f}s), fold total: {time.time()-_fold_t0:.0f}s")
 
         # Sanity checks
         if base_a_fit.validation_probabilities:
@@ -213,33 +341,79 @@ def run_transductive_oof_pipeline(
                 import warnings
                 warnings.warn(f"Base B fold {fold_id}: probabilities collapsed (mean={vb.mean():.6f}, max={vb.max():.6f})")
 
-        # GNN disabled — confirmed zero blend weight across all experiments
-        class _DummyGNN:
-            validation_probabilities = [0.0] * len(valid_users)
-            model_state = None
-            model_meta = {"best_epoch": 0, "best_val_ap": 0.0}
-        graph_fit = _DummyGNN()
+        _skip_gnn = __import__("os").environ.get("SKIP_GNN", "0") == "1"
+        if _skip_gnn:
+            class _DummyGNN:
+                validation_probabilities = [0.0] * len(valid_users)
+                model_state = None
+                model_meta = {"best_epoch": 0, "best_val_ap": 0.0}
+            graph_fit = _DummyGNN()
+            print(f"[fold {fold_id}] GNN skipped (SKIP_GNN=1)", flush=True)
+        else:
+            graph_fit = train_graphsage_model(
+                graph,
+                label_frame=label_frame,
+                train_user_ids=train_users,
+                valid_user_ids=valid_users,
+                max_epochs=graph_max_epochs,
+                hidden_dim=128,
+            )
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+            except Exception:
+                pass
 
-        # Correct-and-Smooth (C&S): graph post-processing on Base A predictions.
+        # Correct-and-Smooth (C&S): graph post-processing.
+        # Always compute Base A val probs (needed for fold_frame regardless of C&S source)
         _val_a_probs = np.asarray(base_a_fit.validation_probabilities, dtype=float)
-        _cs_train_probs = np.mean(
-            [m.predict_proba(train_label_free[base_a_feature_columns])[:, 1] for m in _base_a_models],
-            axis=0,
-        )
-        _cs_val_probs_raw = _val_a_probs
+        # E27: CS_SOURCE selects which base model feeds C&S (default: base_a)
+        import os as _cs_os
+        _cs_source = _cs_os.environ.get("CS_SOURCE", "base_a")
+        _cs_alpha_c = float(_cs_os.environ.get("CS_ALPHA_CORRECT", "0.5"))
+        _cs_alpha_s = float(_cs_os.environ.get("CS_ALPHA_SMOOTH", "0.5"))
+        _cs_n_correct = int(_cs_os.environ.get("CS_N_CORRECT", "50"))
+        _cs_n_smooth = int(_cs_os.environ.get("CS_N_SMOOTH", "50"))
+
+        if _cs_source == "base_e":
+            from official.common import encode_frame as _cs_encode
+            _cs_enc_cols = base_e_fit.encoded_columns
+            _cs_x_train, _ = _cs_encode(train_label_free, base_a_feature_columns, reference_columns=_cs_enc_cols)
+            _cs_train_probs = np.mean(
+                [m.predict_proba(_cs_x_train)[:, 1] for m in _base_e_models],
+                axis=0,
+            )
+            _cs_val_probs_raw = np.asarray(base_e_fit.validation_probabilities, dtype=float)
+            if fold_id == 0:
+                print(f"  C&S source: Base E (XGBoost, {len(_base_e_models)} seeds)", flush=True)
+        else:
+            _cs_train_probs = np.mean(
+                [m.predict_proba(train_label_free[base_a_feature_columns])[:, 1] for m in _base_a_models],
+                axis=0,
+            )
+            _cs_val_probs_raw = np.asarray(base_a_fit.validation_probabilities, dtype=float)
 
         _cs_base_probs: dict[int, float] = {}
         for _uid, _prob in zip(train_label_free["user_id"].astype(int), _cs_train_probs):
             _cs_base_probs[int(_uid)] = float(_prob)
         for _uid, _prob in zip(valid_label_free["user_id"].astype(int), _cs_val_probs_raw):
             _cs_base_probs[int(_uid)] = float(_prob)
+        # Include unlabeled users in C&S base_probs so their fraud signal propagates.
         _all_labeled_ids = set(train_users) | set(valid_users)
         _unlabeled_frame = label_free_frame[~label_free_frame["user_id"].astype(int).isin(_all_labeled_ids)]
         if len(_unlabeled_frame) > 0:
-            _unlabeled_cs_probs = np.mean(
-                [m.predict_proba(_unlabeled_frame[base_a_feature_columns])[:, 1] for m in _base_a_models],
-                axis=0,
-            )
+            if _cs_source == "base_e":
+                _cs_x_unlabeled, _ = _cs_encode(_unlabeled_frame, base_a_feature_columns, reference_columns=_cs_enc_cols)
+                _unlabeled_cs_probs = np.mean(
+                    [m.predict_proba(_cs_x_unlabeled)[:, 1] for m in _base_e_models],
+                    axis=0,
+                )
+            else:
+                _unlabeled_cs_probs = np.mean(
+                    [m.predict_proba(_unlabeled_frame[base_a_feature_columns])[:, 1] for m in _base_a_models],
+                    axis=0,
+                )
             for _uid, _prob in zip(_unlabeled_frame["user_id"].astype(int), _unlabeled_cs_probs):
                 _cs_base_probs[int(_uid)] = float(_prob)
         _cs_train_labels: dict[int, float] = dict(zip(
@@ -248,8 +422,8 @@ def run_transductive_oof_pipeline(
         ))
         _cs_result = correct_and_smooth(
             graph, _cs_train_labels, _cs_base_probs,
-            alpha_correct=0.5, alpha_smooth=0.5,
-            n_correct_iter=50, n_smooth_iter=50,
+            alpha_correct=_cs_alpha_c, alpha_smooth=_cs_alpha_s,
+            n_correct_iter=_cs_n_correct, n_smooth_iter=_cs_n_smooth,
         )
         _val_ids = valid_label_free["user_id"].astype(int).tolist()
         _cs_val_probs = np.array(
@@ -322,23 +496,78 @@ def train_official_model() -> dict[str, Any]:
     train_label_free = label_free_frame[label_free_frame["user_id"].astype(int).isin(labeled_user_ids)].copy()
     train_transductive = with_transductive_frame[with_transductive_frame["user_id"].astype(int).isin(labeled_user_ids)].copy()
 
-    # Multi-seed final models
-    _base_a_final_models = [
-        fit_catboost(train_label_free, None, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed)
-        for _seed in _BASE_A_SEEDS
-    ]
+    # ── 平行化 final model 訓練 ────────────────────────────────────────────
+    print("[final] Training final models (parallel) ...", flush=True)
+    _final_t0 = time.time()
+    _n_final = len(_BASE_A_SEEDS)
+    _final_wt = _worker_threads(_n_final)
+    os.environ["BITOGUARD_CPU_THREADS"] = str(_final_wt)
+    from hardware import hardware_profile as _hp_fn
+    _hp_fn.cache_clear()
+
+    if _PARALLEL_SEEDS and len(_BASE_A_SEEDS) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        def _final_cb(seed):
+            return fit_catboost(train_label_free, None, base_a_feature_columns, focal_gamma=2.0, random_seed=seed)
+        with ThreadPoolExecutor(max_workers=len(_BASE_A_SEEDS)) as pool:
+            _base_a_final_models = list(pool.map(_final_cb, _BASE_A_SEEDS))
+    else:
+        _base_a_final_models = [
+            fit_catboost(train_label_free, None, base_a_feature_columns, focal_gamma=2.0, random_seed=_seed)
+            for _seed in _BASE_A_SEEDS
+        ]
     base_a_final = _base_a_final_models[0]
+    print(f"[final] Base A done ({time.time()-_final_t0:.0f}s)", flush=True)
+
     _base_b_final_params = {"task_type": "CPU", "l2_leaf_reg": 5.0}
     base_b_final = fit_catboost(train_transductive, None, base_b_feature_columns, focal_gamma=2.0, catboost_params=_base_b_final_params)
-    _base_d_finals = [fit_lgbm(train_label_free, None, base_a_feature_columns, random_seed=s) for s in _BASE_D_SEEDS]
+    print(f"[final] Base B done ({time.time()-_final_t0:.0f}s)", flush=True)
+
+    # Base D → Base E 依序（避免 OOM），各自內部平行
+    if _PARALLEL_SEEDS and len(_BASE_D_SEEDS) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_D_SEEDS)))
+        _hp_fn.cache_clear()
+        def _final_lgbm(s): return fit_lgbm(train_label_free, None, base_a_feature_columns, random_seed=s)
+        with ThreadPoolExecutor(max_workers=len(_BASE_D_SEEDS)) as pool:
+            _base_d_finals = list(pool.map(_final_lgbm, _BASE_D_SEEDS))
+    else:
+        _base_d_finals = [fit_lgbm(train_label_free, None, base_a_feature_columns, random_seed=s) for s in _BASE_D_SEEDS]
+    print(f"[final] Base D done ({time.time()-_final_t0:.0f}s)", flush=True)
+
+    if _PARALLEL_SEEDS and len(_BASE_E_SEEDS) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        os.environ["BITOGUARD_CPU_THREADS"] = str(_worker_threads(len(_BASE_E_SEEDS)))
+        _hp_fn.cache_clear()
+        def _final_xgb(s): return fit_xgboost(train_label_free, None, base_a_feature_columns, random_seed=s)
+        with ThreadPoolExecutor(max_workers=len(_BASE_E_SEEDS)) as pool:
+            _base_e_finals = list(pool.map(_final_xgb, _BASE_E_SEEDS))
+    else:
+        _base_e_finals = [fit_xgboost(train_label_free, None, base_a_feature_columns, random_seed=s) for s in _BASE_E_SEEDS]
     base_d_final = _base_d_finals[0]
-    _base_e_finals = [fit_xgboost(train_label_free, None, base_a_feature_columns, random_seed=s) for s in _BASE_E_SEEDS]
     base_e_final = _base_e_finals[0]
 
-    # GNN disabled — confirmed zero blend weight across all experiments
-    class _DummyGNNFinal:
-        model_state = None
-    graph_final = _DummyGNNFinal()
+    # Restore full threads
+    os.environ["BITOGUARD_CPU_THREADS"] = str(os.cpu_count() or 32)
+    _hp_fn.cache_clear()
+    print(f"[final] All final models done ({time.time()-_final_t0:.0f}s)", flush=True)
+
+    graph_epochs = int(np.median([item["graph_best_epoch"] + 1 for item in fold_training_meta])) if fold_training_meta else 40
+    _skip_gnn_final = __import__("os").environ.get("SKIP_GNN", "0") == "1"
+    if _skip_gnn_final:
+        class _DummyGNNFinal:
+            model_state = None
+        graph_final = _DummyGNNFinal()
+        print("[final] GNN skipped (SKIP_GNN=1)", flush=True)
+    else:
+        graph_final = train_graphsage_model(
+            graph,
+            label_frame=label_frame,
+            train_user_ids=labeled_user_ids,
+            valid_user_ids=None,
+            max_epochs=max(FINAL_GRAPH_MIN_EPOCHS, graph_epochs),
+            hidden_dim=128,
+        )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     base_a_paths = [paths.model_dir / f"official_catboost_base_a_seed{seed}_{timestamp}.pkl" for seed in _BASE_A_SEEDS]

@@ -31,7 +31,7 @@ _DEFAULT_WARN_DAYS = int(os.environ.get("BITOGUARD_MODEL_STALENESS_WARN_DAYS", "
 _DEFAULT_ERROR_DAYS = int(os.environ.get("BITOGUARD_MODEL_STALENESS_ERROR_DAYS", "90"))
 
 # Regex to extract ISO timestamp from bundle_version strings like
-# "official_bundle_20260319T040130Z"
+# "official_bundle_20260319T040130Z" or "transductive_v1_20260319T040130Z"
 _BUNDLE_VERSION_TS_RE = re.compile(r"(\d{8}T\d{6}Z)")
 
 

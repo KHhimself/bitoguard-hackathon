@@ -1,0 +1,35 @@
+{
+  "run_id": "official_train_validate_score_20260317_rescue_null_cols",
+  "rescue_run": true,
+  "original_run_id": "official_train_validate_score_20260317",
+  "rescue_reason": "Three compatibility issues required fixes: (1) all-null object columns; (2) CatBoost 1.2.10 Focal loss API; (3) GPU incompatible with Focal+AUC, OOM on full dataset",
+  "modifications": {
+    "official/train.py::_label_free_feature_columns": {
+      "change": "exclude all-null columns (92 windowed feature stubs with dtype=object and 100% null)",
+      "semantic_change": "none - all-null columns carry zero information"
+    },
+    "official/modeling.py::fit_catboost": {
+      "change_1": "loss_function: 'Logloss:focal_gamma=X' -> 'Focal:focal_alpha=0.25;focal_gamma=X' (CatBoost 1.2.10 API)",
+      "change_2": "eval_metric: 'Logloss' -> 'AUC' when using Focal loss (Logloss rejects focal_gamma param)",
+      "change_3": "class_weights: omitted when using Focal loss (Focal loss does not support class_weights in 1.2.10)",
+      "semantic_change": "API compatibility fix; focal_alpha=0.25 is canonical Lin et al. 2017 default"
+    },
+    "env_var_BITOGUARD_USE_GPU=0": {
+      "change": "force CatBoost to CPU (Focal+AUC not implemented on GPU per CatBoost 1.2.10; GPU OOM on full 63K dataset)",
+      "semantic_change": "none - same algorithm, deterministic seed; GraphSAGE still uses GPU via PyTorch"
+    }
+  },
+  "env_vars": {
+    "BITOGUARD_AWS_EVENT_CLEAN_DIR": "/experiment/YuNing/bitoguard-hackathon/data/aws_event/clean/clean",
+    "BITOGUARD_USE_GPU": "0"
+  },
+  "git_commit": "b10a5b5bd68d411e73cdef36c22b7949f49c2302",
+  "environment": {
+    "python_version": "3.12.11",
+    "pytorch_version": "2.8.0+cu128",
+    "catboost_version": "1.2.10",
+    "cuda_version": "12.8",
+    "gpu": "NVIDIA GeForce RTX 2080"
+  },
+  "output_dir": "runs/2026-03-17_official_train/official_train_validate_score_20260317_rescue_null_cols/"
+}

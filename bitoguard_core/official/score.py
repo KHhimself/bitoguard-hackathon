@@ -12,15 +12,6 @@ from official.graph_dataset import build_transductive_graph
 from official.graph_model import load_graph_model, predict_graph_model
 from official.stacking import STACKER_FEATURE_COLUMNS, _add_base_meta_features
 from official.train import _label_frame, _load_dataset, _prepare_base_frames
-
-
-def _resolve_bundle_path(path_str: str) -> Path:
-    """Resolve a bundle path (absolute or relative to bitoguard_core/)."""
-    p = Path(path_str)
-    if p.is_absolute():
-        return p
-    # Relative paths are relative to bitoguard_core/
-    return load_official_paths().artifact_dir.parent / p
 from official.transductive_features import build_transductive_feature_frame
 
 
@@ -38,12 +29,16 @@ def score_official_predict() -> pd.DataFrame:
 
     # Load models — multi-seed for Base A/D/E, single for B
     base_a_paths = bundle["base_model_paths"].get("base_a_catboost_seeds") or [bundle["base_model_paths"]["base_a_catboost"]]
-    base_a_models = [load_pickle(_resolve_bundle_path(p)) for p in base_a_paths]
-    base_b_model = load_pickle(_resolve_bundle_path(bundle["base_model_paths"]["base_b_catboost"]))
-    # GNN disabled — confirmed zero blend weight across all experiments
-    graph_model_state = None
-    stacker_model = load_pickle(_resolve_bundle_path(bundle["stacker_path"]))
-    calibrator = load_pickle(_resolve_bundle_path(bundle["calibrator"]["calibrator_path"]))
+    base_a_models = [load_pickle(Path(p)) for p in base_a_paths]
+    base_b_model = load_pickle(Path(bundle["base_model_paths"]["base_b_catboost"]))
+    _skip_gnn = __import__("os").environ.get("SKIP_GNN", "0") == "1"
+    _graph_path = Path(bundle["graph_model_path"])
+    if _skip_gnn or not _graph_path.exists():
+        graph_model_state = None
+    else:
+        graph_model_state = load_graph_model(_graph_path)
+    stacker_model = load_pickle(Path(bundle["stacker_path"]))
+    calibrator = load_pickle(Path(bundle["calibrator"]["calibrator_path"]))
 
     base_a_cols = bundle["feature_columns_base_a"]
     base_b_cols = bundle["feature_columns_base_b"]
@@ -70,7 +65,7 @@ def score_official_predict() -> pd.DataFrame:
         from official.common import encode_frame
         base_d_cols = bundle.get("feature_columns_base_d", base_a_cols)
         enc_cols = bundle.get("encoded_columns_base_d") or None
-        base_d_models = [load_pickle(_resolve_bundle_path(p)) for p in base_d_paths]
+        base_d_models = [load_pickle(Path(p)) for p in base_d_paths]
         x_score_d, _ = encode_frame(scoring_label_free, base_d_cols, reference_columns=enc_cols)
         base_d_probability = np.mean(
             [m.predict_proba(x_score_d)[:, 1] for m in base_d_models],
@@ -86,7 +81,7 @@ def score_official_predict() -> pd.DataFrame:
         from official.common import encode_frame
         base_e_cols = bundle.get("feature_columns_base_e", base_a_cols)
         enc_cols_e = bundle.get("encoded_columns_base_e") or None
-        base_e_models = [load_pickle(_resolve_bundle_path(p)) for p in base_e_paths]
+        base_e_models = [load_pickle(Path(p)) for p in base_e_paths]
         x_score_e, _ = encode_frame(scoring_label_free, base_e_cols, reference_columns=enc_cols_e)
         base_e_probability = np.mean(
             [m.predict_proba(x_score_e)[:, 1] for m in base_e_models],

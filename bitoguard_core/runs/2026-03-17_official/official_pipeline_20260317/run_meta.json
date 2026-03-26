@@ -1,0 +1,28 @@
+{
+  "run_id": "official_pipeline_20260317",
+  "variant_id": "official_full",
+  "start_time": "2026-03-17T00:00:00Z",
+  "command": "PYTHONPATH=. python -m official.pipeline",
+  "git_commit": "b10a5b5bd68d411e73cdef36c22b7949f49c2302",
+  "environment": {
+    "python_version": "3.12.11",
+    "torch_version": "2.8.0+cu128",
+    "catboost_version": "1.2.10",
+    "lightgbm_version": "4.6.0",
+    "sklearn_version": "1.7.1",
+    "gpu": "NVIDIA GeForce RTX 2080",
+    "cuda_available": true,
+    "platform": "linux",
+    "os": "Linux 5.15.0-173-generic",
+    "cpu_cores": 8,
+    "ram_gb": 81
+  },
+  "datasets": {
+    "raw_dir": "bitoguard_core/data/aws_event/raw",
+    "clean_dir": "bitoguard_core/data/aws_event/clean",
+    "user_info_rows": 63770,
+    "train_label_rows": 51017,
+    "predict_label_rows": 12753
+  },
+  "output_dir": "runs/2026-03-17_official/official_pipeline_20260317/"
+}

@@ -297,8 +297,13 @@ def build_official_graph_features(
     result = result.merge(in_degree, on="user_id", how="left")
     result = result.merge(relation_count, on="user_id", how="left")
 
-    result["relation_component_size"] = result["relation_component_size"].fillna(1).astype(int)
+    result["relation_component_size"] = result.get("relation_component_size", pd.Series(1, index=result.index)).fillna(1).astype(int)
+    if "relation_degree_centrality" not in result.columns:
+        result["relation_degree_centrality"] = 0.0
     result["relation_degree_centrality"] = result["relation_degree_centrality"].fillna(0.0)
+    for col in ["relation_out_degree", "relation_in_degree", "relation_txn_count"]:
+        if col not in result.columns:
+            result[col] = 0
     result[["relation_out_degree", "relation_in_degree", "relation_txn_count"]] = (
         result[["relation_out_degree", "relation_in_degree", "relation_txn_count"]]
         .fillna(0)

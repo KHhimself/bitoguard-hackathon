@@ -107,14 +107,19 @@ hpo_*_best.json
 secrets.yml
 
 # Tool-local state (never commit)
-.kiro/
+.kiro/settings/
 .serena/
 .superpowers/
 .claude/
 .mcp.json
 .postman.json
 mcp.json
+bitoguard_core/catboost_info/
 
 # Planning tool output (plans tracked in docs/superpowers/plans/, state dirs ignored)
 docs/superpowers/.sessions/
 docs/superpowers/.cache/
+
+# MCP server configuration (user-specific)
+.kiro/settings/mcp.json
+mcp.json
