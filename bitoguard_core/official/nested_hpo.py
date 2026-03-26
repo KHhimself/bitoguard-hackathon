@@ -93,9 +93,6 @@ HPO_SEED = 42
 FINAL_SEEDS_A = [42, 52, 62, 72]
 FINAL_SEEDS_D = [42, 123, 456]
 FINAL_SEEDS_E = [42, 123]
-INNER_OOF_SELECTION_SEEDS_A = [HPO_SEED]
-INNER_OOF_SELECTION_SEEDS_D = [HPO_SEED]
-INNER_OOF_SELECTION_SEEDS_E = [HPO_SEED]
 
 GPU_STREAM_CPU_THREADS = 4
 CPU_STREAM_THREADS = 20
@@ -402,6 +399,81 @@ def _mean_validation_probabilities(fits: list[ModelFitResult]) -> np.ndarray:
     )
 
 
+def _build_xgb_qdmatrices(
+    train_frame: pd.DataFrame,
+    valid_frame: pd.DataFrame,
+    feature_columns: list[str],
+):
+    import xgboost as xgb
+
+    x_train, encoded_columns = encode_frame(train_frame, feature_columns)
+    x_valid, _ = encode_frame(valid_frame, feature_columns, reference_columns=encoded_columns)
+    y_train = train_frame["status"].astype(int).to_numpy()
+    y_valid = valid_frame["status"].astype(int).to_numpy()
+    dtrain = xgb.QuantileDMatrix(x_train, label=y_train)
+    dvalid = xgb.QuantileDMatrix(x_valid, label=y_valid, ref=dtrain)
+    return dtrain, dvalid
+
+
+def _fit_xgboost_qdm(
+    dtrain,
+    dvalid,
+    params: dict[str, Any],
+    random_seed: int,
+    scale_pos_weight: float,
+) -> np.ndarray:
+    import xgboost as xgb
+
+    hp = dict(params or {})
+    num_boost_round = int(hp.pop("n_estimators", _XGB_BASELINE["n_estimators"]))
+    booster_params = dict(
+        max_depth=int(hp.get("max_depth", _XGB_BASELINE["max_depth"])),
+        learning_rate=float(hp.get("learning_rate", _XGB_BASELINE["learning_rate"])),
+        subsample=float(hp.get("subsample", _XGB_BASELINE["subsample"])),
+        colsample_bytree=float(hp.get("colsample_bytree", _XGB_BASELINE["colsample_bytree"])),
+        reg_alpha=float(hp.get("reg_alpha", _XGB_BASELINE["reg_alpha"])),
+        reg_lambda=float(hp.get("reg_lambda", _XGB_BASELINE["reg_lambda"])),
+        min_child_weight=float(hp.get("min_child_weight", _XGB_BASELINE["min_child_weight"])),
+        scale_pos_weight=scale_pos_weight,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        verbosity=0,
+        tree_method="hist",
+        device="cuda",
+        seed=random_seed,
+        random_state=random_seed,
+    )
+
+    try:
+        booster = xgb.train(
+            booster_params,
+            dtrain,
+            num_boost_round=num_boost_round,
+            evals=[(dvalid, "valid")],
+            early_stopping_rounds=100,
+            verbose_eval=False,
+        )
+    except Exception:
+        cpu_params = {
+            **booster_params,
+            "device": "cpu",
+            "nthread": os.cpu_count() or 24,
+        }
+        booster = xgb.train(
+            cpu_params,
+            dtrain,
+            num_boost_round=num_boost_round,
+            evals=[(dvalid, "valid")],
+            early_stopping_rounds=100,
+            verbose_eval=False,
+        )
+
+    best_iteration = getattr(booster, "best_iteration", None)
+    if best_iteration is None or best_iteration < 0:
+        return booster.predict(dvalid)
+    return booster.predict(dvalid, iteration_range=(0, best_iteration + 1))
+
+
 def _cs_from_base_a_fits(
     fits: list[ModelFitResult],
     train_f: pd.DataFrame,
@@ -608,7 +680,6 @@ def _catboost_objective(
     graph: TransductiveGraph,
     feature_columns: list[str],
     runtime_cb: dict,
-    dataset: pd.DataFrame | None = None,
 ) -> float:
     """Train Base A with trial params → recompute C&S → blend F1."""
     from catboost import CatBoostClassifier
@@ -647,13 +718,8 @@ def _catboost_objective(
             except Exception:
                 return 0.0
 
-        unlabeled_f = None
-        if dataset is not None:
-            inner_ids = set(train_f["user_id"].astype(int)) | set(valid_f["user_id"].astype(int))
-            unlabeled_f = dataset[~dataset["user_id"].astype(int).isin(inner_ids)]
         base_a_valid, cs_valid = _cs_from_base_a(
             model, train_f, valid_f, feature_columns, graph, fd["train_labels_dict"],
-            unlabeled_f=unlabeled_f,
         )
         oof = _assemble_oof(
             valid_f, base_a_valid, cs_valid,
@@ -769,10 +835,9 @@ def _lgbm_objective(
 
 # ── Stage 2: Dual-Stream HPO ─────────────────────────────────────────────────
 
-def _gpu_stream(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials, dataset=None):
-    """GPU: CatBoost HPO → XGBoost HPO (sequential, sharing GPU)."""
+def _gpu_stream(cb_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials):
+    """GPU: CatBoost HPO only. XGBoost HPO is intentionally skipped."""
     runtime_cb = catboost_runtime_params()
-    runtime_xgb = xgboost_runtime_params()
 
     # CatBoost
     _log("  [GPU] CatBoost HPO starting...")
@@ -785,7 +850,6 @@ def _gpu_stream(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fo
     cb_study.optimize(
         lambda trial: _catboost_objective(
             trial, inner_folds_data, cb_cache, graph, feature_columns, runtime_cb,
-            dataset=dataset,
         ),
         n_trials=n_trials,
     )
@@ -799,29 +863,7 @@ def _gpu_stream(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fo
                               for t in cb_study.trials if t.value is not None]},
               fold_output / "catboost_study.json")
 
-    # XGBoost
-    _log("  [GPU] XGBoost HPO starting...")
-    t0 = time.time()
-    xgb_study = optuna.create_study(
-        direction="maximize", pruner=_make_pruner(),
-        sampler=optuna.samplers.TPESampler(seed=HPO_SEED, n_startup_trials=5),
-    )
-    xgb_study.enqueue_trial(_XGB_BASELINE)
-    xgb_study.optimize(
-        lambda trial: _xgboost_objective(trial, inner_folds_data, de_cache, runtime_xgb),
-        n_trials=n_trials,
-    )
-    xgb_el = time.time() - t0
-    xgb_pr = sum(1 for t in xgb_study.trials if t.state == optuna.trial.TrialState.PRUNED)
-    _log(f"  [GPU] XGBoost HPO done: F1={xgb_study.best_value:.4f} "
-         f"({len(xgb_study.trials)} trials, {xgb_pr} pruned, {xgb_el:.0f}s)")
-    save_json({"best_params": dict(xgb_study.best_params), "best_f1": float(xgb_study.best_value),
-               "n_trials": len(xgb_study.trials), "n_pruned": xgb_pr, "elapsed_s": round(xgb_el, 1),
-               "all_trials": [{"n": t.number, "v": t.value, "p": t.params}
-                              for t in xgb_study.trials if t.value is not None]},
-              fold_output / "xgboost_study.json")
-
-    return dict(cb_study.best_params), dict(xgb_study.best_params)
+    return dict(cb_study.best_params)
 
 
 def _cpu_stream(de_cache, inner_folds_data, fold_output, n_trials):
@@ -849,15 +891,30 @@ def _cpu_stream(de_cache, inner_folds_data, fold_output, n_trials):
     return dict(lgbm_study.best_params)
 
 
-def _run_stage2(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials, dataset=None):
+def _run_stage2(cb_cache, de_cache, inner_folds_data, graph, feature_columns, fold_output, n_trials):
     _log("Stage 2: Dual-stream HPO starting...")
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=2) as pool:
-        gpu_f = pool.submit(_gpu_stream, cb_cache, de_cache, inner_folds_data,
-                            graph, feature_columns, fold_output, n_trials, dataset=dataset)
+        gpu_f = pool.submit(_gpu_stream, cb_cache, inner_folds_data,
+                            graph, feature_columns, fold_output, n_trials)
         cpu_f = pool.submit(_cpu_stream, de_cache, inner_folds_data, fold_output, n_trials)
-        best_cb, best_xgb = gpu_f.result()
+        best_cb = gpu_f.result()
         best_lgbm = cpu_f.result()
+    best_xgb = dict(_XGB_BASELINE)
+    save_json(
+        {
+            "best_params": best_xgb,
+            "best_f1": None,
+            "n_trials": 0,
+            "n_pruned": 0,
+            "elapsed_s": 0.0,
+            "skipped": True,
+            "reason": "XGBoost HPO skipped; prior HPO showed negligible gain over baseline.",
+            "all_trials": [],
+        },
+        fold_output / "xgboost_study.json",
+    )
+    _log("  [GPU] XGBoost HPO skipped — locked to default params")
     _log(f"Stage 2 done ({time.time() - t0:.0f}s)")
     return best_cb, best_lgbm, best_xgb
 
@@ -910,10 +967,10 @@ def _run_stage3(
 
         inner_other = dataset[~dataset["user_id"].astype(int).isin(inner_ids)].copy()
 
-        # Base A × single-seed (selection OOF only)
+        # Base A × multi-seed
         ba_fits = [
             _fit_catboost_with_params(tr_lf, va_lf, feature_columns, cb_hpo.copy(), s)
-            for s in INNER_OOF_SELECTION_SEEDS_A
+            for s in FINAL_SEEDS_A
         ]
         ba_v, cs_v = _cs_from_base_a_fits(
             ba_fits,
@@ -940,19 +997,29 @@ def _run_stage3(
             thread_count=CPU_STREAM_THREADS,
         )
 
-        # Base D × single-seed (selection OOF only, CPU)
+        # Base D × multi-seed (CPU only)
         bd_fits = [
             _fit_lgbm_cpu(tr_lf, va_lf, feature_columns, best_lgbm.copy(), s, n_jobs=CPU_STREAM_THREADS)
-            for s in INNER_OOF_SELECTION_SEEDS_D
+            for s in FINAL_SEEDS_D
         ]
         bd_v = _mean_validation_probabilities(bd_fits)
 
-        # Base E × single-seed (selection OOF only)
-        be_fits = [
-            fit_xgboost(tr_lf, va_lf, feature_columns, params=best_xgb, random_seed=s)
-            for s in INNER_OOF_SELECTION_SEEDS_E
+        # Base E × multi-seed (shared QuantileDMatrix per fold)
+        y_tr_xgb = tr_lf["status"].astype(int)
+        pos_xgb = max(1, int(y_tr_xgb.sum()))
+        neg_xgb = max(1, len(y_tr_xgb) - int(y_tr_xgb.sum()))
+        dtrain_xgb, dvalid_xgb = _build_xgb_qdmatrices(tr_lf, va_lf, feature_columns)
+        be_probs = [
+            _fit_xgboost_qdm(
+                dtrain_xgb,
+                dvalid_xgb,
+                best_xgb,
+                s,
+                min(neg_xgb / pos_xgb, 15.0),
+            )
+            for s in FINAL_SEEDS_E
         ]
-        be_v = _mean_validation_probabilities(be_fits)
+        be_v = np.mean(be_probs, axis=0)
 
         ff = va_lf[["user_id", "status"]].copy()
         ff["primary_fold"] = fold_id
@@ -1022,12 +1089,22 @@ def _run_stage3(
     ]
     ov_d = _mean_validation_probabilities(fd_fits)
 
-    # Base E × multi-seed
-    fe_fits = [
-        fit_xgboost(train_lf, valid_lf, feature_columns, params=best_xgb, random_seed=s)
+    # Base E × multi-seed (shared QuantileDMatrix)
+    y_tr_xgb = train_lf["status"].astype(int)
+    pos_xgb = max(1, int(y_tr_xgb.sum()))
+    neg_xgb = max(1, len(y_tr_xgb) - int(y_tr_xgb.sum()))
+    dtrain_xgb, dvalid_xgb = _build_xgb_qdmatrices(train_lf, valid_lf, feature_columns)
+    fe_probs = [
+        _fit_xgboost_qdm(
+            dtrain_xgb,
+            dvalid_xgb,
+            best_xgb,
+            s,
+            min(neg_xgb / pos_xgb, 15.0),
+        )
         for s in FINAL_SEEDS_E
     ]
-    ov_e = _mean_validation_probabilities(fe_fits)
+    ov_e = np.mean(fe_probs, axis=0)
     _log(f"  3b done ({time.time() - t1:.0f}s)")
 
     # ── 3c: Assemble outer_valid + inner-fold selection ──
@@ -1121,7 +1198,6 @@ def run_outer_fold(
     t2 = time.time()
     best_cb, best_lgbm, best_xgb = _run_stage2(
         cb_cache, de_cache, inner_folds, graph, feature_columns, fold_output, n_trials,
-        dataset=dataset,
     )
     s2 = time.time() - t2
     save_json({"catboost": best_cb, "lightgbm": best_lgbm, "xgboost": best_xgb},
@@ -1222,11 +1298,13 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="Run all 5 outer folds")
     parser.add_argument("--aggregate", action="store_true", help="Aggregate fold results")
     parser.add_argument("--n-trials", type=int, default=N_TRIALS, help=f"HPO trials per model (default: {N_TRIALS})")
-    parser.add_argument("--inner-folds", type=int, default=N_INNER_FOLDS, help=f"Inner HPO folds (default: {N_INNER_FOLDS})")
+    parser.add_argument("--inner-folds", type=int, default=N_INNER_FOLDS, help=f"Inner HPO folds (must be {N_INNER_FOLDS}; flag kept for CLI compatibility)")
     parser.add_argument("--seed", type=int, default=RANDOM_SEED, help=f"Random seed (default: {RANDOM_SEED})")
     args = parser.parse_args()
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+    if args.inner_folds != N_INNER_FOLDS:
+        raise SystemExit(f"--inner-folds must be {N_INNER_FOLDS} for this runner")
 
     if args.aggregate:
         result = aggregate_nested_results()
@@ -1249,16 +1327,12 @@ def main() -> None:
     )
     _log(f"Loaded: {len(dataset)} users, {len(feature_columns)} features ({time.time() - t0:.0f}s)")
     _log(f"Hardware: {hardware_profile()}")
-    resolved_inner_folds = N_INNER_FOLDS
-    if args.inner_folds != N_INNER_FOLDS:
-        _log(f"Requested --inner-folds {args.inner_folds}; using {N_INNER_FOLDS}")
-
     if args.all:
         for fold_k in range(N_OUTER_FOLDS):
             try:
                 run_outer_fold(
                     fold_k, dataset, graph, label_frame, feature_columns, outer_split,
-                    n_trials=args.n_trials, n_inner_folds=resolved_inner_folds, seed=args.seed,
+                    n_trials=args.n_trials, n_inner_folds=args.inner_folds, seed=args.seed,
                 )
             except Exception as e:
                 _log(f"Outer fold {fold_k} FAILED: {e}")
@@ -1276,7 +1350,7 @@ def main() -> None:
     else:
         result = run_outer_fold(
             args.outer_fold, dataset, graph, label_frame, feature_columns, outer_split,
-            n_trials=args.n_trials, n_inner_folds=resolved_inner_folds, seed=args.seed,
+            n_trials=args.n_trials, n_inner_folds=args.inner_folds, seed=args.seed,
         )
         print(f"\nOuter fold {args.outer_fold}: F1={result['best_f1']:.4f} "
               f"P={result['precision']:.4f} R={result['recall']:.4f}")

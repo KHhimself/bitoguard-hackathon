@@ -1,195 +1,137 @@
+---
+inclusion: always
+---
+
 # BitoGuard Project Structure
 
-## Repository Layout
+## Directory Organization
 
-```
-bitoguard/
-├── bitoguard_core/          # Python backend (AML engine)
-├── bitoguard_frontend/      # Next.js frontend (dashboard)
-├── infra/                   # Infrastructure as code
-│   └── aws/                 # AWS deployment (Terraform)
-├── scripts/                 # Deployment and utility scripts
-├── docs/                    # Documentation
-├── .github/workflows/       # CI/CD pipelines
-├── Makefile                 # Task orchestration
-└── docker-compose.yml       # Local development stack
-```
+**Backend (`bitoguard_core/`)**: Python ML/API system
+- `api/` - FastAPI endpoints
+- `db/` - DuckDB schema and Store abstraction
+- `features/` - Feature engineering (~155 features), register all in `registry.py`
+- `models/` - ML training, scoring, rule engine
+- `pipeline/` - Data sync and incremental refresh
+- `services/` - Business logic (alerts, explanations, drift)
+- `ml_pipeline/` - AWS SageMaker integration (preprocessing, training, tuning, model registry)
+- `tests/` - pytest suite (mirror source structure)
+- `artifacts/` - Generated outputs (NEVER commit, gitignored)
 
-## Backend Structure (bitoguard_core/)
+**Frontend (`bitoguard_frontend/`)**: Next.js App Router
+- `src/app/` - Route pages and API proxies
+- `src/components/` - React components (domain-organized)
+- `src/lib/` - Utilities and API clients
 
-### Core Modules
+**Infrastructure (`infra/aws/`)**: AWS resources
+- `terraform/` - IaC modules (*.tf files)
+- `lambda/` - Lambda function handlers
 
-```
-bitoguard_core/
-├── api/                     # FastAPI endpoints
-│   └── main.py             # API server with 13 endpoints
-├── db/                      # Database layer
-│   ├── schema.py           # DuckDB table definitions
-│   └── store.py            # Data access layer
-├── features/                # Feature engineering
-│   ├── build_features.py   # Statistical features (peer deviation, rolling windows)
-│   ├── build_features_v2.py # Enhanced feature set (~155 columns)
-│   ├── graph_features.py   # NetworkX graph analysis
-│   ├── graph_bipartite.py  # Bipartite graph construction
-│   ├── graph_propagation.py # Risk propagation algorithms
-│   ├── crypto_features.py  # Crypto-specific features
-│   ├── ip_features.py      # IP-based features
-│   ├── profile_features.py # User profile features
-│   ├── sequence_features.py # Temporal sequence features
-│   ├── swap_features.py    # Swap transaction features
-│   ├── trading_features.py # Trading pattern features
-│   ├── twd_features.py     # TWD fiat features
-│   └── registry.py         # Feature registry
-├── models/                  # ML models
-│   ├── train.py            # LightGBM training
-│   ├── train_catboost.py   # CatBoost training
-│   ├── anomaly.py          # IsolationForest anomaly detection
-│   ├── stacker.py          # Ensemble stacking (CatBoost + LightGBM + LR)
-│   ├── score.py            # Risk scoring engine
-│   ├── validate.py         # Model evaluation (P@K, calibration)
-│   ├── rule_engine.py      # 11 deterministic AML rules
-│   ├── dormancy.py         # Dormancy detection
-│   └── common.py           # Shared model utilities
-├── pipeline/                # Data pipeline
-│   ├── sync.py             # Full data sync from BitoPro
-│   ├── sync_source.py      # Source API client
-│   ├── load_oracle.py      # Oracle data loading
-│   ├── normalize.py        # Data normalization
-│   ├── rebuild_edges.py    # Graph edge reconstruction
-│   ├── refresh_live.py     # Incremental watermark refresh
-│   └── transformers.py     # Data transformations
-├── services/                # Business logic services
-│   ├── alert_engine.py     # Alert generation and management
-│   ├── diagnosis.py        # Risk diagnosis with SHAP
-│   ├── drift.py            # Feature drift detection
-│   └── explain.py          # Model explainability
-├── tests/                   # Test suite (61 tests)
-│   ├── conftest.py         # pytest fixtures
-│   ├── test_smoke.py       # Smoke tests
-│   ├── test_rule_engine.py # Rule engine tests
-│   ├── test_model_pipeline.py # End-to-end pipeline tests
-│   ├── test_graph_*.py     # Graph analysis tests
-│   ├── test_stacker.py     # Ensemble tests
-│   └── test_store.py       # Database tests
-├── artifacts/               # Generated artifacts (gitignored)
-│   ├── bitoguard.duckdb    # Main database
-│   ├── models/             # Trained model files (.pkl, .json)
-│   └── reports/            # Alert reports
-├── config.py               # Configuration management
-├── source_client.py        # BitoPro API client
-├── oracle_client.py        # Oracle data client
-└── requirements.txt        # Python dependencies
-```
+**Other**: `scripts/` (deployment), `docs/` (architecture guides)
 
-### Module Responsibilities
+## Module Placement Rules
 
-- **api/**: REST API endpoints for frontend integration
-- **db/**: Database schema and data access abstraction
-- **features/**: All feature engineering logic (statistical, graph, domain-specific)
-- **models/**: ML model training, scoring, and evaluation
-- **pipeline/**: Data ingestion, transformation, and refresh
-- **services/**: High-level business logic (alerts, explanations, drift)
-- **tests/**: Comprehensive test coverage
+**Backend Python:**
+- Feature calculation → `features/<domain>_features.py` + register in `features/registry.py`
+- ML algorithm → `models/train_<algorithm>.py` (local) OR `ml_pipeline/<component>.py` (SageMaker)
+- AML rule → `models/rule_engine.py` (add to RULES dict)
+- Pipeline step → `pipeline/<step_name>.py`
+- API endpoint → `api/main.py` (FastAPI route)
+- Business logic → `services/<service_name>.py`
+- Test → `tests/test_<module>.py` (mirror source structure)
 
-## Frontend Structure (bitoguard_frontend/)
+**Frontend TypeScript:**
+- Page → `src/app/<route>/page.tsx`
+- Component → `src/components/<domain>/<ComponentName>.tsx`
+- API proxy → `src/app/api/backend/<route>/route.ts`
+- Utility → `src/lib/<utility>.ts`
 
-```
-bitoguard_frontend/
-├── src/
-│   ├── app/                # Next.js App Router pages
-│   │   ├── page.tsx        # Home/dashboard
-│   │   ├── alerts/         # Alert list and detail pages
-│   │   ├── users/          # User 360 view
-│   │   ├── metrics/        # Model metrics dashboard
-│   │   └── api/            # API proxy routes
-│   │       └── backend/    # Proxy to bitoguard_core
-│   ├── components/         # React components
-│   │   ├── ui/             # Reusable UI components (Radix)
-│   │   └── [feature]/      # Feature-specific components
-│   └── lib/                # Utilities and helpers
-├── public/                 # Static assets
-├── .env.example            # Environment template
-└── package.json            # Node dependencies
-```
+**Infrastructure:**
+- Lambda → `infra/aws/lambda/<function_name>/lambda_function.py` (handler: `lambda_function.lambda_handler`)
+- Terraform → `infra/aws/terraform/<resource_type>.tf`
+- Script → `scripts/<action>-<target>.sh`
 
-## Infrastructure (infra/)
+## Execution Rules (CRITICAL)
 
-```
-infra/
-└── aws/
-    ├── terraform/          # Terraform IaC
-    │   ├── main.tf         # Provider config
-    │   ├── vpc.tf          # Network infrastructure
-    │   ├── ecs.tf          # ECS Fargate services
-    │   ├── alb.tf          # Load balancer
-    │   ├── ecr.tf          # Container registry
-    │   ├── efs.tf          # Persistent storage
-    │   ├── iam.tf          # IAM roles/policies
-    │   ├── cloudwatch.tf   # Logging/monitoring
-    │   ├── autoscaling.tf  # Auto-scaling policies
-    │   └── secrets.tf      # Secrets Manager
-    └── ARCHITECTURE.md     # AWS architecture docs
-```
+**Python Backend:**
+- ALWAYS run from `bitoguard_core/` with `PYTHONPATH=.`
+- Use absolute imports: `from db.store import Store` (NOT `from ..db.store`)
+- Commands: `cd bitoguard_core && PYTHONPATH=. python -m <module>` or `PYTHONPATH=. pytest tests/`
 
-## Key Conventions
+**Frontend:**
+- Run from `bitoguard_frontend/`: `npm run dev` (port 3000)
+- Validation required: `npm run lint && npm run build`
+- Use `@/` import alias: `import { AlertCard } from '@/components/alerts/AlertCard'`
 
-### Python Code Organization
-- All modules run with `PYTHONPATH=.` from `bitoguard_core/` directory
-- Use relative imports within modules: `from db.store import Store`
-- Configuration via `config.py` and environment variables
-- Tests mirror source structure in `tests/` directory
+## Naming Conventions
 
-### Frontend Code Organization
-- App Router structure: `app/[route]/page.tsx`
-- API proxy pattern: `/api/backend/*` routes to backend
-- Component library: Radix UI + Tailwind CSS
-- Type safety: TypeScript with strict mode
+**Python:**
+- Files/modules: `snake_case.py` (e.g., `build_features_v2.py`)
+- Tests: `test_<module>.py` (e.g., `test_rule_engine.py`)
+- Classes: `PascalCase` (e.g., `class FeatureStore`)
+- Functions/variables: `snake_case` (e.g., `def build_feature_snapshot()`)
 
-### Artifact Storage
-- Models: `bitoguard_core/artifacts/models/`
-- Database: `bitoguard_core/artifacts/bitoguard.duckdb`
-- Reports: `bitoguard_core/artifacts/reports/`
-- All artifacts are gitignored
+**TypeScript:**
+- Components: `PascalCase.tsx` (e.g., `AlertCard.tsx`)
+- Routes: `page.tsx` (Next.js convention)
+- Utilities: `camelCase.ts` or `kebab-case.ts`
+- Variables/functions: `camelCase`
 
-### Testing
-- Backend tests: Run from `bitoguard_core/` with `PYTHONPATH=. pytest tests/`
-- Frontend tests: Run from `bitoguard_frontend/` with `npm run lint`
-- Integration tests cover full pipeline: sync → features → train → score
+**Infrastructure:**
+- Terraform: `<resource_type>.tf` (e.g., `sagemaker_training.tf`)
+- Lambda: `lambda_function.py` (AWS convention)
+- Scripts: `<action>-<target>.sh` (e.g., `deploy-ml-pipeline.sh`)
 
-### Deployment Artifacts
-- Docker images: Built from root-level Dockerfiles in each service
-- Terraform state: Stored locally or in S3 backend
-- Environment configs: `.env` files (never committed)
+## Artifacts (NEVER Commit)
 
-## File Naming Patterns
+Generated files in `bitoguard_core/artifacts/` (gitignored):
+- Models: `models/<algo>_<timestamp>.joblib` + `.sha256` checksum
+- Metadata: `models/cv_results_<timestamp>.json`
+- Database: `bitoguard.duckdb` (DuckDB embedded)
+- Reports: `reports/alert_<id>.json`, `drift_report.json`
+- Timestamps: ISO 8601 format `YYYYMMDDTHHMMSSZ`
 
-- Python modules: `snake_case.py`
-- TypeScript/React: `kebab-case.tsx` or `PascalCase.tsx` for components
-- Config files: `lowercase.extension` (e.g., `config.py`, `tsconfig.json`)
-- Documentation: `UPPERCASE.md` for top-level, `lowercase.md` for nested
+## Configuration Hierarchy
 
-## Import Patterns
+**Backend:** `config.py` defaults → Environment variables → AWS SSM Parameter Store (`/bitoguard/{env}/ml/config`)
 
-### Backend (Python)
-```python
-# Absolute imports from project root
-from db.store import Store
-from features.build_features import build_feature_snapshot
-from models.train import train_model
+**Frontend:** `.env.local` (dev, gitignored) → Environment variables (prod)
 
-# Always run with PYTHONPATH=.
-```
+**Infrastructure:** `terraform.tfvars` (gitignored) → `variables.tf` defaults → SSM Parameter Store
 
-### Frontend (TypeScript)
-```typescript
-// Relative imports
-import { AlertCard } from '@/components/alerts/AlertCard'
-import { fetchAlerts } from '@/lib/api'
-```
+**Security:** NEVER commit secrets, API keys, or `.env` files. Use environment variables or SSM.
 
-## Configuration Management
+## Testing Requirements
 
-- Backend: `config.py` + environment variables
-- Frontend: `.env.local` for local dev, environment variables in production
-- Infrastructure: `terraform.tfvars` for AWS resources
-- Never commit secrets or API keys
+**Backend:** Run `cd bitoguard_core && PYTHONPATH=. pytest tests/` before commits
+- Test files mirror source: `tests/test_<module>.py` for `<module>.py`
+- Use fixtures from `tests/conftest.py`
+- Cover: rules, features, models, graph, store, pipeline
+
+**Frontend:** Run `npm run lint && npm run build` before commits (no test framework yet)
+
+**Infrastructure:** Run `terraform fmt -check -recursive && terraform validate` before commits
+
+## Common Implementation Patterns
+
+**Add feature:**
+1. Create `features/<domain>_features.py` with builder function
+2. Register in `features/registry.py` with human-readable description
+3. Add tests in `tests/test_<domain>_features.py`
+4. Verify no future data leakage (temporal correctness)
+5. Retrain models, check precision@K impact
+
+**Add API endpoint:**
+1. Add route to `api/main.py` (FastAPI)
+2. Use `db/store.py` Store abstraction
+3. Return Pydantic models for validation
+4. Test with curl or Postman
+
+**Add Lambda:**
+1. Create `infra/aws/lambda/<name>/lambda_function.py` (handler: `lambda_function.lambda_handler`)
+2. Add Terraform resource in `infra/aws/terraform/lambda.tf`
+3. Use boto3 for AWS SDK, log structured JSON to CloudWatch
+
+**Modify ML pipeline:**
+1. Local: update `models/train.py` or `features/build_features_v2.py`
+2. AWS: update `ml_pipeline/` entrypoints and `infra/aws/terraform/`
+3. Test locally first, deploy to dev, monitor drift/performance
