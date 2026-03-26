@@ -393,17 +393,25 @@ def test_metrics_model_endpoint_returns_full_report(tmp_path: Path, monkeypatch)
 
 
 def test_metrics_drift_endpoint_returns_health_status(tmp_path: Path, monkeypatch) -> None:
-    """GET /metrics/drift returns a drift health report with expected fields."""
+    """GET /metrics/drift returns a combined health report with feature drift, PSI, and staleness."""
     _configure_temp_db(tmp_path, monkeypatch)
     client = TestClient(app)
     resp = client.get("/metrics/drift")
     assert resp.status_code == 200
     body = resp.json()
-    for field in ("snapshot_from", "snapshot_to", "total_checked", "total_drifted", "health_ok", "drifted_features"):
-        assert field in body, f"missing field: {field}"
+    # Top-level keys
+    assert "health_ok" in body, "missing health_ok in drift response"
     assert isinstance(body["health_ok"], bool)
-    assert isinstance(body["drifted_features"], list)
-    assert isinstance(body["total_checked"], int)
+    # Feature drift sub-report
+    assert "feature_drift" in body, "missing feature_drift in drift response"
+    feat = body["feature_drift"]
+    for field in ("snapshot_from", "snapshot_to", "total_checked", "total_drifted", "health_ok", "drifted_features"):
+        assert field in feat, f"missing field in feature_drift: {field}"
+    assert isinstance(feat["drifted_features"], list)
+    assert isinstance(feat["total_checked"], int)
+    # Score PSI and model staleness may be None when no scoring runs / bundle exists
+    assert "score_psi" in body
+    assert "model_staleness" in body
 
 
 def test_pipeline_sync_rejects_inverted_time_window(tmp_path: Path, monkeypatch) -> None:
@@ -516,6 +524,38 @@ def test_score_v2_uses_transaction_for_db_write():
             "DELETE" not in str(call) for call in store.execute.call_args_list
         ), "store.execute(DELETE) must not be called outside a transaction"
 
+
+
+
+def test_load_neighborhood_edges_caps_neighbor_ids():
+    """
+    _load_neighborhood_edges must cap neighbor_ids at _MAX_NEIGHBOR_IDS
+    to prevent unbounded SQL placeholder construction.
+    """
+    import pandas as pd
+    from unittest.mock import MagicMock
+    from api.main import _load_neighborhood_edges, _MAX_NEIGHBOR_IDS
+
+    many_neighbor_ids = [f"entity_{i}" for i in range(_MAX_NEIGHBOR_IDS + 100)]
+    one_hop_df = pd.DataFrame({
+        "src_id": ["focus_user"] * len(many_neighbor_ids),
+        "dst_id": many_neighbor_ids,
+        "src_type": ["user"] * len(many_neighbor_ids),
+        "dst_type": ["wallet"] * len(many_neighbor_ids),
+        "relation_type": ["owns_wallet"] * len(many_neighbor_ids),
+        "edge_id": [f"e{i}" for i in range(len(many_neighbor_ids))],
+    })
+
+    store = MagicMock()
+    store.fetch_df.side_effect = [one_hop_df, pd.DataFrame()]
+
+    _load_neighborhood_edges(store, "focus_user", max_hops=2)
+
+    second_call_sql = store.fetch_df.call_args_list[1][0][0]
+    placeholder_count = second_call_sql.count("?")
+    assert placeholder_count // 2 <= _MAX_NEIGHBOR_IDS, (
+        f"SQL had {placeholder_count // 2} neighbors; must be capped at {_MAX_NEIGHBOR_IDS}"
+    )
 
 @pytest.mark.integration
 def test_alerts_generated_after_scoring() -> None:

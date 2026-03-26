@@ -1,0 +1,48 @@
+experiment_name: "official_pipeline_train_validate_score_20260317"
+baseline_description: "Primary F1=0.363, AP=0.284 (isotonic calibration, threshold=0.1492)"
+git_commit: "b10a5b5bd68d411e73cdef36c22b7949f49c2302"
+date: "2026-03-17"
+
+phases:
+  - phase: "train"
+    description: "Train base models (CatBoost A label-free, CatBoost B transductive, GraphSAGE GNN) + LR stacker"
+    entry_point: "official.train.train_official_model"
+    note: "Feature parquets already built in artifacts/official_features/"
+
+  - phase: "validate"
+    description: "Dual-split validation: primary label-mask transductive CV (5-fold) + secondary group-stress"
+    entry_point: "official.validate.validate_official_model"
+
+  - phase: "score"
+    description: "Score all predict-cohort users and write predictions parquet/csv"
+    entry_point: "official.score.score_official_model"
+
+run_matrix:
+  - run_id: "official_train_validate_score_20260317"
+    seeds: [42]
+    command: >
+      PYTHONPATH=. python -c "
+      from official.train import train_official_model
+      from official.validate import validate_official_model
+      from official.score import score_official_model
+      import json
+      result = train_official_model()
+      val = validate_official_model()
+      score_official_model()
+      "
+    expected_artifacts:
+      - artifacts/models/official_catboost_base_a_*.pkl
+      - artifacts/models/official_catboost_base_b_*.pkl
+      - artifacts/models/official_graphsage_*.pt
+      - artifacts/models/official_stacker_*.pkl
+      - artifacts/official_bundle.json
+      - artifacts/reports/official_validation_report.json
+      - artifacts/predictions/official_predict_scores.parquet
+      - artifacts/predictions/official_predict_scores.csv
+
+success_criteria:
+  base_b_mean_prob_min: 0.01
+  base_b_max_prob_min: 0.05
+  base_c_pct_at_1_max: 0.99
+  target_f1_min: 0.363
+  target_ap_min: 0.284

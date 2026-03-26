@@ -1,0 +1,24 @@
+{
+  "enabled": true,
+  "name": "BitoGuard API Testing",
+  "description": "Monitors BitoGuard API source code changes and automatically runs Postman collection tests",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "bitoguard_core/api/*.py",
+      "bitoguard_core/models/*.py",
+      "bitoguard_core/services/*.py",
+      "bitoguard_core/pipeline/*.py",
+      "bitoguard_core/features/*.py",
+      "bitoguard_mock_api/app/*.py",
+      "bitoguard_core/requirements.txt",
+      "bitoguard_mock_api/requirements.txt",
+      "bitoguard_mock_api/openapi.yaml"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "BitoGuard API source code has been modified. Please check the .postman.json file. If collection ID exists, run the Postman collection tests and report results. If any tests fail, analyze the errors and suggest fixes. If .postman.json is empty, create a new Postman workspace and collection for BitoGuard API testing."
+  }
+}

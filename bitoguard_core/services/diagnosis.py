@@ -105,7 +105,10 @@ def _timeline_summary(login: pd.DataFrame, crypto: pd.DataFrame, trade: pd.DataF
         subset = frame[frame["user_id"] == user_id].copy()
         if subset.empty:
             continue
-        time_col = [col for col in subset.columns if col.endswith("_at")][0]
+        at_cols = [col for col in subset.columns if col.endswith("_at")]
+        if not at_cols:
+            continue
+        time_col = at_cols[0]
         subset[time_col] = pd.to_datetime(subset[time_col], utc=True)
         latest = subset.sort_values(time_col, ascending=False).head(5)
         for _, row in latest.iterrows():

@@ -83,12 +83,15 @@ Thumbs.db
 secrets.yml
 
 # Tool-local state (never commit)
-.kiro/
+.kiro/settings/
 .serena/
 .superpowers/
 bitoguard_core/catboost_info/
-mcp.json
 
 # Planning tool output (plans tracked in docs/superpowers/plans/, state dirs ignored)
 docs/superpowers/.sessions/
 docs/superpowers/.cache/
+
+# MCP server configuration (user-specific)
+.kiro/settings/mcp.json
+mcp.json

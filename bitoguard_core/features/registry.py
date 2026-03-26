@@ -22,6 +22,10 @@ from features.ip_features       import compute_ip_features
 from features.sequence_features import compute_sequence_features
 from features.graph_bipartite   import compute_bipartite_features
 from features.rule_features     import compute_rule_features
+from features.typology_features import compute_typology_features
+from features.event_ngram_features import compute_event_ngram_features
+from features.statistical_features import compute_statistical_features
+from features.dormancy import compute_dormancy_score
 
 FEATURE_VERSION_V2 = "v2"
 
@@ -100,6 +104,8 @@ def build_v2_features(
         compute_ip_features(logins),
         compute_sequence_features(fiat, trades, crypto),
         compute_bipartite_features(edges, user_ids, snapshot_date=snapshot_date),
+        compute_event_ngram_features(fiat, crypto, trades),
+        compute_statistical_features(fiat, crypto, trades),
     ]
     # Paired probe functions for modules that need special probing
     probe_fns = [
@@ -111,6 +117,8 @@ def build_v2_features(
         lambda: compute_ip_features(_make_probe_logins()),
         lambda: compute_sequence_features(_make_probe_fiat(), _make_probe_trades(), _make_probe_crypto()),
         None,
+        None,  # event_ngram_features — no probe needed (handles empty inputs gracefully)
+        None,  # statistical_features — no probe needed (handles empty inputs gracefully)
     ]
 
     for module_df, probe_fn in zip(module_entries, probe_fns):
@@ -191,6 +199,40 @@ def build_v2_features(
             base["xch_cashout_ratio_lifetime"] * base["crypto_trx_tx_share"]
         ).clip(upper=10.0)
 
+    # Early-burst × cashout: mule accounts transact heavily in first 3 days AND cash out
+    # immediately. This multiplicative interaction is the strongest known mule signal.
+    if "xch_cashout_ratio_7d" in base.columns and "early_3d_volume" in base.columns:
+        base["cashout_early_burst"] = (
+            base["xch_cashout_ratio_7d"] * (base["early_3d_volume"].clip(upper=1e6) / 1e5)
+        ).clip(upper=10.0)
+
+    # Night-hour cashout: nocturnal cash-out pattern (money mules often operate off-hours)
+    if "trade_night_share" in base.columns and "xch_cashout_ratio_lifetime" in base.columns:
+        base["night_cashout_signal"] = (
+            base["trade_night_share"] * base["xch_cashout_ratio_lifetime"]
+        ).clip(upper=5.0)
+
+    # Rule trigger × volume: rule hits weighted by withdrawal volume amplify signal for
+    # high-volume suspicious patterns while suppressing low-volume false positives.
+    if "rule_hit_count" in base.columns and "crypto_wdr_twd_sum" in base.columns:
+        base["rule_volume_signal"] = (
+            base["rule_hit_count"] * (base["crypto_wdr_twd_sum"].clip(upper=1e7) / 1e6)
+        ).clip(upper=20.0)
+
+    # --- Module: FATF AML typology signals ---
+    # Inserted after cross-channel derived features so xch_cashout_ratio_7d/lifetime
+    # are already present. Best-effort: failures result in missing columns filled to 0.
+    try:
+        typology_feats = compute_typology_features(base)
+        if typology_feats is not None and not typology_feats.empty:
+            for col in typology_feats.columns:
+                if col == "user_id":
+                    continue
+                if col not in base.columns:
+                    base[col] = typology_feats[col]
+    except Exception:
+        pass  # Typology features are best-effort; missing -> 0 via fillna below
+
     # Rule signals: evaluate M1 rules on the assembled v2 frame (including cross-channel)
     # and add outputs as features. This lets the stacker learn interactions between
     # rule firings and behavioral features (e.g., fast_cash_out_2h AND high crypto volume).
@@ -204,6 +246,9 @@ def build_v2_features(
 
     # fillna(0) for rule columns and any remaining NaN
     base = base.fillna(0)
+
+    # Task 1: Add explicit dormancy score (fraction of behavioral columns that are zero)
+    base["dormancy_score"] = compute_dormancy_score(base)
 
     return base.reset_index(drop=True)
 
